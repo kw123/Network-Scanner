@@ -1,0 +1,68 @@
+ Network Scanner – Indigo Plugin
+Change Log
+================================================================================
+
+Version 2025.0.2  (2026-04-13)
+-------------------------------
+INSTALLATION
+  No third-party packages required.
+  All discovery uses macOS built-in tools:
+    • /usr/sbin/tcpdump  — passive ARP sniffing
+    • /sbin/ping         — subnet sweep and reachability checks
+    • /usr/sbin/arp      — reads ARP cache after ping sweep
+
+  Optional vendor name lookup:
+    pip3 install manuf
+
+CONFIGURATION  (Plugins → Network Scanner → Configure…)
+  Network Interface       : interface to scan, default en0 (WiFi)
+  Scan Interval (seconds) : how often to ping known devices, default 60s
+  Offline Threshold (sec) : how long a device must be unreachable before
+                            marked offline, default 180s (3 min)
+  Enable ARP Sweep        : active subnet sweep on each scan interval
+  Enable Passive Sniffing : listen for ARP traffic between sweeps
+  Auto-Create Devices     : automatically create an Indigo device for
+                            each new MAC address discovered
+  Device Folder Name      : Indigo folder for Net_* devices, default
+                            "Network Devices" (created automatically)
+
+PLUGIN MENU  (Plugins → Network Scanner)
+  List All Discovered Devices : prints all known MACs to the Indigo log
+                                with IP, online status, vendor, last seen
+  Force Immediate Rescan      : triggers an ARP sweep + ping check now
+  Manage Ignored MAC Addresses: opens a dialog to exclude specific devices
+                                from being created or updated
+
+DEVICE DETAILS
+  Each discovered device is named  Net_AA:BB:CC:DD:EE:FF
+  Address column : MAC address (with colons)
+  Notes column   : IP address with last octet zero-padded (192.168.1.005)
+                   — enables correct alphabetical sort by IP
+  States:
+    onOffState   : True = reachable, False = offline
+    ipAddress    : last seen IP address
+    macAddress   : MAC address
+    vendorName   : manufacturer (requires manuf package)
+    lastSeen     : timestamp of last successful ping  YYYY-MM-DD HH:MM:SS
+    created      : timestamp when Indigo device was first created
+
+IGNORED MACs
+  Via Plugins menu → Manage Ignored MAC Addresses:
+    • Top list shows all discovered devices — click one, then click
+      "▼ Ignore Selected Device" to exclude it
+    • Bottom list shows currently ignored devices — click one, then click
+      "▲ Un-ignore Selected Device" to re-enable it
+    • Click OK to save
+  Ignored devices are neither created nor updated by the scanner.
+
+OFFLINE LOGIC
+  A device is marked offline only after it has failed to respond to pings
+  for longer than the configured Offline Threshold (default 3 minutes).
+  A single missed ping does not immediately flip the device offline —
+  this avoids false alarms from brief network blips.
+
+================================================================================
+Version 1.0.0  (initial release)
+  First version using scapy for ARP sniffing and sweep.
+  Replaced in 2025.1.0 with tcpdump/ping/arp to avoid root requirement.
+================================================================================

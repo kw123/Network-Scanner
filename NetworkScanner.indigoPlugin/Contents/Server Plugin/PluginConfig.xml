@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<PluginConfig>
+
+	<Field id="pluginHeader" type="label" fontColor="orange">
+		<Label>Network Scanner  —  discovers LAN devices via ARP sniffing, sweep and ping. Creates one Indigo device per MAC address; tracks online/offline state, IP, vendor and open ports.</Label>
+	</Field>
+
+	<Field id="networkInterface" type="textfield">
+		<Label>Network Interface</Label>
+	</Field>
+	<Field id="networkInterfaceLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+		<Label>Interface to sniff (e.g. en0, eth0). Leave blank to auto-detect.</Label>
+	</Field>
+
+	<Field id="scanInterval" type="menu">
+		<Label>Scan Interval (seconds)</Label>
+		<List>
+			<Option value="30">30</Option>
+			<Option value="60">60</Option>
+			<Option value="90">90</Option>
+			<Option value="120">120</Option>
+		</List>
+	</Field>
+	<Field id="scanIntervalLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+		<Label>How often to ping known devices to check online status, can be switched on/off in device edit.</Label>
+	</Field>
+
+	<Field id="arpSweepEnabled" type="checkbox">
+		<Label>Enable ARP Sweep</Label>
+	</Field>
+	<Field id="arpSweepEnabledLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+		<Label>Sweep the subnet with ARP requests to discover new devices.</Label>
+	</Field>
+
+	<Field id="sniffEnabled" type="checkbox">
+		<Label>Enable Passive ARP Sniffing</Label>
+	</Field>
+	<Field id="sniffEnabledLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+		<Label>Passively listen for ARP packets to discover devices as they appear.</Label>
+	</Field>
+
+	<Field id="offlineThreshold" type="menu">
+		<Label>Offline Threshold (seconds)</Label>
+		<List>
+			<Option value="30">30</Option>
+			<Option value="60">60</Option>
+			<Option value="90">90</Option>
+			<Option value="120">120</Option>
+			<Option value="180">180</Option>
+			<Option value="240">240</Option>
+			<Option value="300">300</Option>
+			<Option value="360">360</Option>
+			<Option value="420">420</Option>
+		</List>
+	</Field>
+	<Field id="offlineThresholdLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+		<Label>Mark a device offline if not seen for this many seconds, can be overwritten in device edit for each device.</Label>
+	</Field>
+
+	<Field id="startupGracePeriod" type="menu">
+		<Label>Ignore offline changes at startup (seconds)</Label>
+		<List>
+			<Option value="20">20</Option>
+			<Option value="40">40</Option>
+			<Option value="60">60</Option>
+			<Option value="80">80</Option>
+		</List>
+	</Field>
+	<Field id="startupGracePeriodLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+		<Label>Do not mark any device offline for this many seconds after the plugin starts. Gives ARP sniffing time to re-confirm all devices.</Label>
+	</Field>
+
+	<Field id="autoCreateDevices" type="checkbox">
+		<Label>Auto-Create Indigo Devices</Label>
+	</Field>
+	<Field id="autoCreateDevicesLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+		<Label>Automatically create an Indigo device for each new MAC address found.</Label>
+	</Field>
+
+	<Field id="deviceFolder" type="textfield">
+		<Label>Device Folder Name</Label>
+	</Field>
+	<Field id="deviceFolderLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+		<Label>Place auto-created Net_* devices in this Indigo folder (created if needed). Leave blank for root.</Label>
+	</Field>
+
+	<Field id="debugSeparator" type="label">
+		<Label>── Logging ──────────────────────────</Label>
+	</Field>
+
+	<Field id="debugNewDevice" type="checkbox">
+		<Label>Log New Device Created</Label>
+	</Field>
+	<Field id="debugNewDeviceLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+		<Label>Log when a new Indigo device is created for a discovered MAC.</Label>
+	</Field>
+
+	<Field id="debugStateChange" type="checkbox">
+		<Label>Log Online / Offline Changes</Label>
+	</Field>
+	<Field id="debugStateChangeLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+		<Label>Log when a device changes between online and offline.</Label>
+	</Field>
+
+	<Field id="stateChangeLogLevel" type="menu">
+		<Label>Online / Offline Log Destination</Label>
+		<List>
+			<Option value="10">plugin.log only</Option>
+			<Option value="20">plugin.log + Indigo log</Option>
+		</List>
+	</Field>
+	<Field id="stateChangeLogLevelLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+		<Label>Where to write the online/offline message (only used when Log Online / Offline Changes is enabled).</Label>
+	</Field>
+
+	<Field id="debugIpChange" type="checkbox">
+		<Label>Log IP Address Changes</Label>
+	</Field>
+	<Field id="debugIpChangeLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+		<Label>Log when a device is seen with a different IP than before.</Label>
+	</Field>
+
+	<Field id="debugSeen" type="checkbox">
+		<Label>Log Every Device Seen</Label>
+	</Field>
+	<Field id="debugSeenLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+		<Label>Log every ARP packet or sweep hit (can be noisy).</Label>
+	</Field>
+
+	<Field id="debugSweep" type="checkbox">
+		<Label>Log ARP Sweep Activity</Label>
+	</Field>
+	<Field id="debugSweepLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+		<Label>Log when each ARP sweep starts and finishes.</Label>
+	</Field>
+
+	<Field id="debugIgnored" type="checkbox">
+		<Label>Log Ignored MACs Skipped</Label>
+	</Field>
+	<Field id="debugIgnoredLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+		<Label>Log each time an ignored MAC is seen and skipped.</Label>
+	</Field>
+
+</PluginConfig>

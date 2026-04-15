@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Devices>
+
+	<!--
+		NetworkDevice: one device per discovered MAC address.
+		onState  = True  → device is online (reachable by ARP/ping)
+		onState  = False → device is offline
+	-->
+	<Device type="custom" id="networkDevice">
+	<UiDisplayStateId>onOffState</UiDisplayStateId>
+		<Name>Network Device</Name>
+		<ConfigUI>
+			<Field id="pingMode" type="menu" defaultValue="confirm">
+				<Label>Ping Usage</Label>
+				<List>
+					<Option value="both">Online + Offline  (ping sets both)</Option>
+					<Option value="online">Online only  (ping can mark online, not offline)</Option>
+					<Option value="offline">Offline only   (ping can mark offline, not online)</Option>
+					<Option value="confirm">Confirm offline  (ping only when ARP timeout exceeded)</Option>
+					<Option value="none">Not at all  (ignore ping results for this device)</Option>
+				</List>
+			</Field>
+			<Field id="pingModeLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+				<Label>Control how periodic pings affect this device's online/offline state.
+				use "Online + Offline" for verbose ping tracking of device
+				use "Online only"  to get devices back to "on" fast when they disappeared (left house and came back)
+				use "Offline only" to make devices go offline fast when they disappear
+				use "Confirm offline" to make sure that devices that have the tendency to be quiet do not go off to fast
+				use "Not at all" if device is fine w/o ping checks </Label>
+			</Field>
+
+			<Field id="pingOfflineLogic" type="menu" defaultValue="and">
+				<Label>Offline Trigger Logic</Label>
+				<List>
+					<Option value="and">AND — timeout expired  AND  ping failed  (default, least false-positives)</Option>
+					<Option value="or">OR  — timeout expired  OR   ping failed  (faster offline detection)</Option>
+				</List>
+			</Field>
+			<Field id="pingOfflineLogicLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+				<Label>How ping failure and ARP timeout combine to decide offline (not used in "Online only" or "Not at all" modes).</Label>
+			</Field>
+
+			<Field id="pingMissedCount" type="menu" defaultValue="1">
+				<Label>Missed Pings Before Offline</Label>
+				<List>
+					<Option value="1">1  (first failure counts)</Option>
+					<Option value="2">2</Option>
+					<Option value="3">3</Option>
+					<Option value="4">4</Option>
+					<Option value="5">5</Option>
+				</List>
+			</Field>
+			<Field id="pingMissedCountLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+				<Label>Consecutive failed pings needed to trigger offline. Higher values reduce false-offline on transient packet loss.</Label>
+			</Field>
+
+			<Field id="offlineThreshold" type="menu" defaultValue="0">
+				<Label>Offline Threshold (seconds)</Label>
+				<List>
+					<Option value="0">0  (use plugin default)</Option>
+					<Option value="30">30</Option>
+					<Option value="60">60</Option>
+					<Option value="90">90</Option>
+					<Option value="120">120</Option>
+					<Option value="180">180</Option>
+					<Option value="240">240</Option>
+					<Option value="300">300</Option>
+					<Option value="360">360</Option>
+					<Option value="420">420</Option>
+				</List>
+			</Field>
+			<Field id="offlineThresholdLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+				<Label>Mark offline if not seen for this many seconds. 0 = use the plugin-wide default.</Label>
+			</Field>
+
+			<Field id="comment" type="textfield" defaultValue="">
+				<Label>Comment</Label>
+			</Field>
+			<Field id="commentLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+				<Label>Free-text note stored as a device state.</Label>
+			</Field>
+
+			<Field id="suppressIpChangeLog" type="checkbox" defaultValue="false">
+				<Label>Suppress IP Change Logging</Label>
+			</Field>
+			<Field id="suppressIpChangeLogLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+				<Label>Do not write IP address changes for this device to the log.</Label>
+			</Field>
+
+			<Field id="logSeenToFile" type="checkbox" defaultValue="false">
+				<Label>Log Every Seen Event to File</Label>
+			</Field>
+			<Field id="logSeenToFileLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+				<Label>Write a debug entry to plugin.log each time this device is seen.</Label>
+			</Field>
+		</ConfigUI>
+		<States>
+			<State id="onOffState">
+				<ValueType boolType="onoff">Boolean</ValueType>
+				<TriggerLabel>Device Online Status Changed</TriggerLabel>
+				<ControlPageLabel>Online</ControlPageLabel>
+			</State>
+			<State id="ipAddress">
+				<ValueType>String</ValueType>
+				<TriggerLabel>IP Address Changed</TriggerLabel>
+				<ControlPageLabel>IP Address</ControlPageLabel>
+			</State>
+			<State id="macAddress">
+				<ValueType>String</ValueType>
+				<TriggerLabel>MAC Address Changed</TriggerLabel>
+				<ControlPageLabel>MAC Address</ControlPageLabel>
+			</State>
+			<State id="lastOnOffChange">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Last On/Off Change</TriggerLabel>
+				<ControlPageLabel>Last On/Off Change</ControlPageLabel>
+			</State>
+			<State id="vendorName">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Vendor Changed</TriggerLabel>
+				<ControlPageLabel>Vendor</ControlPageLabel>
+			</State>
+			<State id="created">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Created</TriggerLabel>
+				<ControlPageLabel>Created</ControlPageLabel>
+			</State>
+			<State id="openPorts">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Open Ports Changed</TriggerLabel>
+				<ControlPageLabel>Open Ports</ControlPageLabel>
+			</State>
+			<State id="comment">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Comment Changed</TriggerLabel>
+				<ControlPageLabel>Comment</ControlPageLabel>
+			</State>
+		</States>
+	</Device>
+
+</Devices>

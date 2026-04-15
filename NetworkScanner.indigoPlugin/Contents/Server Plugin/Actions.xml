@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Actions>
+
+	<!-- Manual ping check for a single device -->
+	<Action id="pingDevice" deviceFilter="self">
+		<n>Ping Device Now</n>
+		<CallbackMethod>pingDeviceAction</CallbackMethod>
+	</Action>
+
+	<!-- Rename the device to include vendor name -->
+	<Action id="renameWithVendor" deviceFilter="self">
+		<n>Rename Device with Vendor Name</n>
+		<CallbackMethod>renameWithVendorAction</CallbackMethod>
+	</Action>
+
+</Actions>

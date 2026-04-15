@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MenuItems>
+
+	<MenuItem id="listKnownDevices">
+		<Name>List All Discovered Devices</Name>
+		<CallbackMethod>listKnownDevices</CallbackMethod>
+	</MenuItem>
+
+	<MenuItem id="forceRescan">
+		<Name>Force Immediate Rescan</Name>
+		<CallbackMethod>forceRescan</CallbackMethod>
+	</MenuItem>
+
+	<MenuItem id="scanOpenPorts">
+		<Name>Scan Open Ports on All Online Devices…</Name>
+		<CallbackMethod>scanOpenPorts</CallbackMethod>
+	</MenuItem>
+
+	<MenuItem id="setDevState">
+		<Name>Set a State of Device…</Name>
+		<ConfigUI>
+			<Field id="MSG" type="label" defaultValue="">
+				<Label> </Label>
+			</Field>
+			<Field id="devId" type="menu" defaultValue="0">
+				<Label>Select device:</Label>
+				<List class="self" filter="all" method="filterNetworkAllDevices" dynamicReload="true"/>
+			</Field>
+			<Field id="refreshCallbackMethod" type="textfield" defaultValue="dynamicCallbackSetDeviceID" hidden="true"/>
+			<Field id="stateName" type="menu">
+				<Label>Select state to overwrite:</Label>
+				<List class="self" filter="" method="selectState" dynamicReload="true"/>
+			</Field>
+			<Field id="oldValue" type="textfield" readonly="true">
+				<Label>Current value:</Label>
+			</Field>
+			<Field id="newValue" type="textfield">
+				<Label>New value:</Label>
+			</Field>
+			<Field id="newValueUi" type="textfield">
+				<Label>New UI value (leave blank to ignore):</Label>
+			</Field>
+			<Field id="executeOverwrite" type="button">
+				<Label> </Label>
+				<Title>OVERWRITE</Title>
+				<CallbackMethod>executeOverwriteButtonState</CallbackMethod>
+			</Field>
+		</ConfigUI>
+	</MenuItem>
+
+	<MenuItem id="printSeenStats">
+		<Name>Print Seen-Interval Statistics…</Name>
+		<ConfigUI>
+			<Field id="sortOrder" type="menu" defaultValue="ip">
+				<Label>Sort by</Label>
+				<List>
+					<Option value="ip">IP address</Option>
+					<Option value="name">Device name</Option>
+					<Option value="lastseen">Last seen</Option>
+				</List>
+			</Field>
+			<Field id="execPrint" type="button">
+				<Label> </Label>
+				<Title>PRINT</Title>
+				<CallbackMethod>printSeenStats</CallbackMethod>
+			</Field>
+		</ConfigUI>
+	</MenuItem>
+
+	<MenuItem id="resetSeenStats">
+		<Name>Reset Seen-Interval Statistics</Name>
+		<CallbackMethod>resetSeenStats</CallbackMethod>
+	</MenuItem>
+
+	<MenuItem id="helpPlugin">
+		<Name>Help…</Name>
+		<CallbackMethod>helpPlugin</CallbackMethod>
+	</MenuItem>
+
+	<MenuItem id="manageIgnoredMacs">
+		<Name>Manage Ignored MAC Addresses…</Name>
+		<ConfigUI>
+			<Field id="availableDevicesList" type="list" rows="8">
+				<Label>Discovered Devices  (click to select)</Label>
+				<List class="self" filter="available" method="getNetworkDeviceList" dynamicReload="true"/>
+			</Field>
+			<Field id="addToIgnoredButton" type="button">
+				<Label> </Label>
+				<Title>▼  Ignore Selected Device</Title>
+				<CallbackMethod>addToIgnored</CallbackMethod>
+			</Field>
+			<Field id="ignoredDevicesList" type="list" rows="5">
+				<Label>Ignored Devices  (click to select)</Label>
+				<List class="self" filter="ignored" method="getIgnoredDeviceList" dynamicReload="true"/>
+			</Field>
+			<Field id="removeFromIgnoredButton" type="button">
+				<Label> </Label>
+				<Title>▲  Un-ignore Selected Device</Title>
+				<CallbackMethod>removeFromIgnored</CallbackMethod>
+			</Field>
+		</ConfigUI>
+	</MenuItem>
+
+</MenuItems>
