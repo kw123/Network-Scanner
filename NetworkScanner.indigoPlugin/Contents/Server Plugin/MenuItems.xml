@@ -1,11 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <MenuItems>
 
-	<MenuItem id="listKnownDevices">
-		<Name>List All Discovered Devices</Name>
-		<CallbackMethod>listKnownDevices</CallbackMethod>
-	</MenuItem>
-
 	<MenuItem id="forceRescan">
 		<Name>Force Immediate Rescan</Name>
 		<CallbackMethod>forceRescan</CallbackMethod>
@@ -48,6 +43,65 @@
 		</ConfigUI>
 	</MenuItem>
 
+
+	<MenuItem id="manageIgnoredMacs">
+		<Name>Manage Ignored MAC Addresses…</Name>
+		<ConfigUI>
+			<Field id="availableDevicesList" type="list" rows="8">
+				<Label>Discovered Devices  (click to select)</Label>
+				<List class="self" filter="available" method="getNetworkDeviceList" dynamicReload="true"/>
+			</Field>
+			<Field id="addToIgnoredButton" type="button">
+				<Label> </Label>
+				<Title>▼  Ignore Selected Device</Title>
+				<CallbackMethod>addToIgnored</CallbackMethod>
+			</Field>
+			<Field id="ignoredDevicesList" type="list" rows="5">
+				<Label>Ignored Devices  (click to select)</Label>
+				<List class="self" filter="ignored" method="getIgnoredDeviceList" dynamicReload="true"/>
+			</Field>
+			<Field id="removeFromIgnoredButton" type="button">
+				<Label> </Label>
+				<Title>▲  Un-ignore Selected Device</Title>
+				<CallbackMethod>removeFromIgnored</CallbackMethod>
+			</Field>
+		</ConfigUI>
+	</MenuItem>
+
+
+	<MenuItem id="printStuff">
+		<Name>---- print tools ---</Name>
+	</MenuItem>
+
+	<MenuItem id="listKnownDevices">
+		<Name>Print All Discovered Devices</Name>
+		<CallbackMethod>listKnownDevices</CallbackMethod>
+	</MenuItem>
+
+	<MenuItem id="printInstableDevices">
+		<Name>Print devices that have frequent on and off…</Name>
+		<ConfigUI>
+			<Field id="cutoff" type="menu" defaultValue="300">
+				<Label>only look at devs with time between on off less than</Label>
+				<List>
+					<Option value="60">1 minute</Option>
+					<Option value="120">2 minutes</Option>
+					<Option value="180">3 minutes</Option>
+					<Option value="240">4 minutes</Option>
+					<Option value="300">5 minutes</Option>
+					<Option value="360">6 minutes</Option>
+					<Option value="420">7 minutes</Option>
+					<Option value="480">8 minutes</Option>
+				</List>
+			</Field>
+			<Field id="execprintInstableDevices" type="button">
+				<Label> </Label>
+				<Title>PRINT</Title>
+				<CallbackMethod>printInstableDevices</CallbackMethod>
+			</Field>
+		</ConfigUI>
+	</MenuItem>
+
 	<MenuItem id="printSeenStats">
 		<Name>Print Seen-Interval Statistics…</Name>
 		<ConfigUI>
@@ -76,27 +130,34 @@
 		<Name>Help…</Name>
 		<CallbackMethod>helpPlugin</CallbackMethod>
 	</MenuItem>
+	
+	
+	<MenuItem id="Fingscan">
+		<Name>---- Fingscan Migration Tools ---</Name>
+	</MenuItem>
 
-	<MenuItem id="manageIgnoredMacs">
-		<Name>Manage Ignored MAC Addresses…</Name>
+	<MenuItem id="importNamesFromFingscan">
+		<Name>Import info from fingscan</Name>
 		<ConfigUI>
-			<Field id="availableDevicesList" type="list" rows="8">
-				<Label>Discovered Devices  (click to select)</Label>
-				<List class="self" filter="available" method="getNetworkDeviceList" dynamicReload="true"/>
+			<Field id="MSG" type="label" defaultValue="">
+				<Label>All devices found with matching MAC number will get a state: fingscanDeviceName = old fingscan name, ping settings </Label>
 			</Field>
-			<Field id="addToIgnoredButton" type="button">
-				<Label> </Label>
-				<Title>▼  Ignore Selected Device</Title>
-				<CallbackMethod>addToIgnored</CallbackMethod>
+			<Field id="executeImport" type="button">
+				<Title>IMPORT</Title>
+				<CallbackMethod>importNamesFromFingscan</CallbackMethod>
 			</Field>
-			<Field id="ignoredDevicesList" type="list" rows="5">
-				<Label>Ignored Devices  (click to select)</Label>
-				<List class="self" filter="ignored" method="getIgnoredDeviceList" dynamicReload="true"/>
+		</ConfigUI>
+	</MenuItem>
+
+	<MenuItem id="overwriteDevNamesWithFingNames">
+		<Name>Overwrite device names with old fingscan names</Name>
+		<ConfigUI>
+			<Field id="MSG" type="label" defaultValue="">
+				<Label>All devices found with matching MAC number will get a new name: "oldfing scan name" - prefix Name</Label>
 			</Field>
-			<Field id="removeFromIgnoredButton" type="button">
-				<Label> </Label>
-				<Title>▲  Un-ignore Selected Device</Title>
-				<CallbackMethod>removeFromIgnored</CallbackMethod>
+			<Field id="executeOverwrite" type="button">
+				<Title>OVERWRITE</Title>
+				<CallbackMethod>overwriteDevNamesWithFingNames</CallbackMethod>
 			</Field>
 		</ConfigUI>
 	</MenuItem>

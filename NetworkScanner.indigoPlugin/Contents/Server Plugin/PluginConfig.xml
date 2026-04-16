@@ -2,7 +2,7 @@
 <PluginConfig>
 
 	<Field id="pluginHeader" type="label" fontColor="orange">
-		<Label>Network Scanner  —  discovers LAN devices via ARP sniffing, sweep and ping. Creates one Indigo device per MAC address; tracks online/offline state, IP, vendor and open ports.</Label>
+		<Label>Network Scanner  —  discovers LAN devices via passive traffic sniffing, ARP sweep, ping and TCP probe. Creates one Indigo device per MAC address; tracks online/offline state, IP, vendor and open ports.</Label>
 	</Field>
 
 	<Field id="networkInterface" type="textfield">
@@ -10,6 +10,14 @@
 	</Field>
 	<Field id="networkInterfaceLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 		<Label>Interface to sniff (e.g. en0, eth0). Leave blank to auto-detect.</Label>
+	</Field>
+
+	<Field id="sudoPassword" type="textfield" defaultValue="" secure="true">
+		<Label>sudo Password</Label>
+	</Field>
+	<Field id="sudoPasswordLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+		<Label>macOS login password — needed so tcpdump can open the raw network socket via sudo. 
+  Leave blank if tcpdump already has the required entitlements.</Label>
 	</Field>
 
 	<Field id="scanInterval" type="menu">
@@ -22,7 +30,7 @@
 		</List>
 	</Field>
 	<Field id="scanIntervalLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
-		<Label>How often to ping known devices to check online status, can be switched on/off in device edit.</Label>
+		<Label>How often to run the reachability probe (ping + curl TCP fallback) on known devices. Can be tuned per device in device edit.</Label>
 	</Field>
 
 	<Field id="arpSweepEnabled" type="checkbox">
@@ -33,10 +41,10 @@
 	</Field>
 
 	<Field id="sniffEnabled" type="checkbox">
-		<Label>Enable Passive ARP Sniffing</Label>
+		<Label>Enable Passive Traffic Sniffing</Label>
 	</Field>
 	<Field id="sniffEnabledLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
-		<Label>Passively listen for ARP packets to discover devices as they appear.</Label>
+		<Label>Passively capture all ethernet traffic via tcpdump to detect any active device — not just ARP. Catches devices that suppress ARP responses. Each MAC is throttled to one update per 5 s. Requires sudo password below if tcpdump does not already have the BPF entitlement.</Label>
 	</Field>
 
 	<Field id="offlineThreshold" type="menu">
@@ -82,6 +90,14 @@
 	</Field>
 	<Field id="deviceFolderLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 		<Label>Place auto-created Net_* devices in this Indigo folder (created if needed). Leave blank for root.</Label>
+	</Field>
+
+
+	<Field id="prefixName" type="textfield">
+		<Label>Prefix Name</Label>
+	</Field>
+	<Field id="prefixNameLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+		<Label>prefix for device name  eg "NET-"</Label>
 	</Field>
 
 	<Field id="debugSeparator" type="label">
@@ -139,6 +155,13 @@
 	</Field>
 	<Field id="debugIgnoredLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 		<Label>Log each time an ignored MAC is seen and skipped.</Label>
+	</Field>
+
+	<Field id="debugPing" type="checkbox">
+		<Label>Log Ping / Probe Results</Label>
+	</Field>
+	<Field id="debugPingLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+		<Label>Log every ICMP ping and TCP socket probe result to plugin.log (can be noisy during sweeps).</Label>
 	</Field>
 
 </PluginConfig>

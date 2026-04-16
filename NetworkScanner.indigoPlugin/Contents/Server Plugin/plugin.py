@@ -14,30 +14,53 @@ MAC address found.  The device's on/off state reflects whether the physical
 device is currently reachable on the network.
 
 REQUIREMENTS  (macOS built-ins — nothing to install)
-  /usr/sbin/tcpdump   — passive ARP sniffing
-  /sbin/ping          — subnet sweep and reachability checks
+  /usr/sbin/tcpdump   — passive traffic sniffing (ARP + mDNS + DHCP)
   /usr/sbin/arp       — reads ARP cache after sweep
   MAC2Vendor.py       — bundled OUI vendor lookup (auto-downloads + caches)
+  Python socket       — ICMP ping and TCP-port probes; no subprocess, no root needed
 
 --------------------------------------------------------------------------------
 DISCOVERY METHODS
-  1. Passive ARP sniffing  — listens for ARP broadcasts via tcpdump (no sweep)
-  2. Active ARP sweep      — parallel ping sweep of the entire subnet, then
-                             reads ARP cache; only ping-responders update
-                             last-seen (stale ARP entries are ignored)
-  3. Periodic ping check   — keeps online/offline states current between sweeps
+  1. Passive traffic sniffing — tcpdump listens for ARP, mDNS (port 5353) and
+                                DHCP (ports 67/68).  Any matching packet from a
+                                device updates its last-seen timestamp.
+                                Catches devices that suppress ARP (iOS privacy
+                                mode, VMs, IoT).  Each MAC throttled to one
+                                update per 30 s to avoid Indigo API flooding.
+                                Requires sudo password in plugin config if
+                                tcpdump does not already have the BPF entitlement.
+  2. Active ARP sweep         — parallel ICMP ping sweep of the entire subnet,
+                                then reads ARP cache.  Only devices that respond
+                                to ping (or TCP probe) update last-seen; stale
+                                ARP cache entries do not count as "online".
+  3. Periodic reachability    — each scan cycle probes every known device:
+                                  a. ICMP ping via Python socket (no subprocess)
+                                  b. If ping fails (or is blocked): TCP connect
+                                     on ports 80 → 443 → 22 → 8080 via Python
+                                     socket.  Connection refused counts as alive.
+                                  c. Per-device option to skip TCP fallback and
+                                     use ICMP-only for online/offline decisions.
+                                The winning TCP port is remembered per device so
+                                subsequent probes go straight to that port first.
+                                After 5 consecutive all-port failures the TCP
+                                probe is suspended for that device (auto-resets
+                                when ping next succeeds).
 
 --------------------------------------------------------------------------------
 PLUGIN CONFIGURATION  (Plugins → Network Scanner → Configure…)
   Network Interface                 interface to sniff, default en0 (WiFi)
-  Scan Interval (s)                 how often to ping known devices  [30/60/90/120]
+  sudo Password                     macOS login password so tcpdump can open the
+                                    raw BPF socket via  echo <pw> | sudo -S.
+                                    Leave blank if tcpdump already has the
+                                    entitlement (common after granting access once).
+  Scan Interval (s)                 how often to probe known devices [30/60/90/120]
   Enable ARP Sweep                  active subnet sweep each scan cycle
-  Enable Passive Sniffing           listen for ARP traffic between sweeps
+  Enable Passive Traffic Sniffing   listen for ARP/mDNS/DHCP between sweeps
   Offline Threshold (s)             unreachable for this long → marked offline
                                     [30/60/90/120/180/240/300/360/420, default 180]
                                     can be overridden per device in device edit
   Ignore offline changes at startup suppress offline decisions for N seconds after
-                                    plugin start so ARP can re-confirm devices
+                                    plugin start so sniffing can re-confirm devices
                                     [20/40/60/80, default 60]
   Auto-Create Devices               create an Indigo device for each new MAC found
   Device Folder Name                Indigo folder for Net_* devices (auto-created)
@@ -51,25 +74,35 @@ PLUGIN CONFIGURATION  (Plugins → Network Scanner → Configure…)
   Log Every Device Seen             verbose per-packet log (can be noisy)
   Log ARP Sweep Activity            log sweep start / finish
   Log Ignored MACs Skipped          log each time an ignored MAC is seen
+  Log Ping / Probe Results          log every ICMP ping and TCP probe result
+                                    (can be noisy during sweeps)
 
 --------------------------------------------------------------------------------
 DEVICE EDIT  (double-click any Net_* device)
-  Ping Usage
-    Online + Offline (both)         ping sets both online and offline state
-    Online only                     ping can mark online, not offline
-    Offline only                    ping can mark offline, not online
-    Confirm offline  [default]      ping only fires when ARP timeout exceeded;
-                                    logs to plugin.log when ping keeps device online
-    Not at all                      ping ignored; ARP timeout alone decides offline
-				use "Online + Offline" for verbose ping tracking of device
-				use "Online only"  to get devices back to "on" fast when they disappeared (left house and came back)
-				use "Offline only" to make devices go offline fast when they disappear
-				use "Confirm offline" to make sure that devices that have the tendency to be quiet do not go off to fast
-				use "Not at all" if device is fine w/o ping checks
+  Ping / Probe Usage
+    Controls how the periodic reachability probe affects online/offline state.
+    The probe is: ICMP ping → TCP connect fallback (unless "ICMP Only" is set).
+
+    Online + Offline (both)         probe sets both online and offline state
+                                    → use for verbose tracking of a device
+    Online only                     probe can mark online, not offline
+                                    → use to get devices back online fast after they
+                                      reappear (e.g. phone leaving/returning home)
+    Offline only                    probe can mark offline, not online
+                                    → use to make devices go offline fast when they disappear
+    Confirm offline  [default]      probe only fires when sniff/ARP timeout exceeded;
+                                    logged to plugin.log when probe keeps device online
+                                    → use for quiet devices that must not go offline too fast
+    Not at all                      probe ignored; sniff/ARP timeout alone decides offline
+                                    → use when passive detection alone is sufficient
+  ICMP Ping Only (no TCP fallback)  skip the TCP socket probe for this device;
+                                    online/offline decided by ICMP ping alone
+                                    → use for routers, cameras, printers where
+                                      TCP probing is undesirable
   Offline Trigger Logic
-    AND  [default]                  timeout expired AND ping failed (fewest false alarms)
-    OR                              timeout expired OR  ping failed (faster detection)
-  Missed Pings Before Offline       consecutive failures before offline [1–5, default 1]
+    AND  [default]                  timeout expired AND probe failed (fewest false alarms)
+    OR                              timeout expired OR  probe failed (faster detection)
+  Missed Pings Before Offline       consecutive probe failures before offline [1–5, default 1]
   Offline Threshold (s)             per-device override; 0 = use plugin-wide default
   Comment                           free-text note, stored in device state "comment"
   Suppress IP Change Logging        silence IP-change log for this device only
@@ -85,6 +118,8 @@ DEVICE STATES
   created             timestamp when the Indigo device was first created
   openPorts           comma-separated open TCP ports from last port scan
   comment             free-text note set in device edit
+  localName           mDNS / Bonjour hostname from arp -a  (e.g. "iPhone.local");
+                      populated during ARP sweep; empty if device has no announced name
 
 DEVICE NAMING & SORTING
   Name    : Net_AA:BB:CC:DD:EE:FF  (or  Net_AA:BB:CC:DD:EE:FF  VendorName)
@@ -155,7 +190,14 @@ import MAC2Vendor  # type: ignore
 # ---------------------------------------------------------------------------
 PLUGIN_ID      = "com.karlwachs.networkscanner"
 DEVICE_TYPE_ID = "networkDevice"
+STDDTSTRING    = "%Y-%m-%d %H:%M:%S"
+_CURL_PORTS_DEFAULT = (80, 443, 22, 8080)
 
+# Bump this whenever Devices.xml gains or changes states/props.
+# deviceStartComm() calls stateListOrDisplayStateIdChanged() only when this
+# value differs from what is stored in the device's pluginProps — avoids an
+# expensive Indigo API round-trip on every normal restart.
+SCHEMA_VERSION = "2025.0.6"
 # ---------------------------------------------------------------------------
 # Plugin config defaults
 # Indigo ignores defaultValue= in PluginConfig.xml for prefs already saved,
@@ -170,6 +212,8 @@ kDefaultPluginPrefs = {
 	"startupGracePeriod":  "60",
 	"autoCreateDevices":   True,
 	"deviceFolder":      "Network Devices",
+	"prefixName":		 "NET_",
+	"sudoPassword":      "",
 	# per-device defaults (applied when creating new devices)
 	"pingMode":          "confirm",
 	# logging categories  (key = "debug" + area-name)
@@ -180,6 +224,7 @@ kDefaultPluginPrefs = {
 	"debugSeen":           False,
 	"debugSweep":          False,
 	"debugIgnored":        False,
+	"debugPing":           False,
 }
 
 # ---------------------------------------------------------------------------
@@ -236,10 +281,6 @@ _SCAN_PORTS = {
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _now_str():
-	return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
 def _ip_for_notes(ip: str) -> str:
 	"""Return IP with last octet zero-padded to 3 digits for sortable Notes column.
 	e.g. 192.168.1.5 → 192.168.1.005,  192.168.1.54 → 192.168.1.054
@@ -251,13 +292,47 @@ def _ip_for_notes(ip: str) -> str:
 	except Exception:
 		return ip
 
+def _now_str():
+	return datetime.datetime.now().strftime(STDDTSTRING)
 
-def _mac_to_device_name(mac: str, vendor: str = "") -> str:
-	"""Build the auto-generated device name.
-	Without vendor : Net_AA:BB:CC:DD:EE:FF
-	With vendor    : Net_AA:BB:CC:DD:EE:FF  Apple Inc
+def _date_string_to_Object(dd):
+	return datetime.datetime.strptime(dd, STDDTSTRING)
+
+def _date_diff_in_Seconds(dt1, dt2):
+	# Calculate the time difference between dt2 and dt1; dt2 > dt1
+	timedelta = _date_string_to_Object(dt2) - _date_string_to_Object(dt1)
+	# Return the total time difference in seconds
+	return timedelta.days * 24 * 3600 + timedelta.seconds
+
+def _strip_local_suffix(name: str) -> str:
+	"""Remove common local-network domain suffixes from a Bonjour/mDNS hostname.
+	e.g. 'iPhone.local' → 'iPhone',  'MacBook-Pro.localdomain' → 'MacBook-Pro'
+	Suffixes stripped: .local  .localdomain  .lan  .home  .internal
 	"""
-	base = "Net_" + mac.upper()
+	for suffix in (".localdomain", ".local", ".lan", ".home", ".internal"):
+		if name.lower().endswith(suffix):
+			return name[:-len(suffix)]
+	return name
+
+
+def _mac_to_device_name(mac: str, vendor: str = "", local_name: str = "", prefixName: str = "Net_") -> str:
+	"""Build the auto-generated device name.
+
+	Priority for the display label appended after the MAC:
+	  1. local_name  (mDNS/Bonjour hostname from arp -a, suffix stripped)
+	                 e.g. 'iPhone.local' → 'Net_AA:BB:CC:DD:EE:FF  iPhone'
+	  2. vendor      (OUI manufacturer name)
+	                 e.g.                 → 'Net_AA:BB:CC:DD:EE:FF  Apple Inc'
+	  3. neither     → 'Net_AA:BB:CC:DD:EE:FF'
+	"""
+	base = prefixName + mac.upper()
+	# Prefer the local network name — strip domain suffix and sanitise
+	if local_name:
+		display = _strip_local_suffix(local_name.strip())
+		safe    = re.sub(r"[^A-Za-z0-9 _\-]", "", display).strip()[:24]
+		if safe:
+			return f"{base}  {safe}"
+	# Fall back to vendor name
 	if vendor and vendor.strip().lower() not in ("", "unknown"):
 		safe = re.sub(r"[^A-Za-z0-9 _\-]", "", vendor).strip()[:20]
 		if safe:
@@ -265,52 +340,119 @@ def _mac_to_device_name(mac: str, vendor: str = "") -> str:
 	return base
 
 
-def _is_auto_name(name: str, mac: str) -> bool:
-	"""Return True if name was auto-generated (starts with Net_<MAC>).
-	Used to decide whether it is safe to rename the device.
+
+def _icmp_checksum(data: bytes) -> int:
+	"""Standard one's-complement checksum used in ICMP headers (RFC 792)."""
+	if len(data) % 2:
+		data += b'\x00'
+	s = sum(struct.unpack('!%dH' % (len(data) // 2), data))
+	s = (s >> 16) + (s & 0xFFFF)
+	s += s >> 16
+	return ~s & 0xFFFF
+
+
+def _ping(ip: str, timeout: float = 1.0) -> bool:
+	"""Return True if host replies to an ICMP echo request.
+
+	Uses SOCK_DGRAM + IPPROTO_ICMP — no subprocess, no root required on macOS.
+	The kernel fills in the IP header; we supply only the ICMP payload.
+
+	Error mapping:
+	  recv() returns data  → echo reply received → True
+	  socket.timeout       → no reply within timeout → False
+	  OSError              → unreachable / no route / permission denied → False
 	"""
-	return name.startswith("Net_" + mac.upper())
+	icmp_id  = os.getpid() & 0xFFFF
+	header   = struct.pack('!BBHHH', 8, 0, 0, icmp_id, 1)   # type=8 echo, code=0, cksum placeholder
+	payload  = b'NS'
+	checksum = _icmp_checksum(header + payload)
+	packet   = struct.pack('!BBHHH', 8, 0, checksum, icmp_id, 1) + payload
 
-
-def _ping(ip: str, timeout: int = 1) -> bool:
-	"""Return True if host replies to a single ICMP ping."""
+	s = None
 	try:
-		result = subprocess.run(
-			["/sbin/ping", "-c", "1", "-W", str(timeout * 1000), "-t", str(timeout), ip],
-			stdout=subprocess.DEVNULL,
-			stderr=subprocess.DEVNULL,
-			timeout=timeout + 2,
-		)
-		return result.returncode == 0
+		s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_ICMP)
+		s.settimeout(timeout)
+		s.sendto(packet, (ip, 0))
+		s.recv(1024)
+		return True
 	except Exception:
 		return False
+	finally:
+		if s:
+			try: s.close()
+			except Exception: pass
+
+
+
+def _curl_check(ip: str, preferred_port: int = None, timeout: float = 0.5) -> int | None:
+	"""TCP-connect probe: try common ports and return the first responding port, or None.
+
+	Uses a raw Python socket — no subprocess overhead.
+	preferred_port is tried first (last port that worked for this device).
+
+	Result logic:
+	  connect() succeeds          → port open,   device alive  → return port
+	  ConnectionRefusedError      → port closed, device alive  → return port
+	  socket.timeout / OSError    → no response on this port   → try next
+	"""
+	ports = ((preferred_port,) + tuple(p for p in _CURL_PORTS_DEFAULT if p != preferred_port)
+	         if preferred_port else _CURL_PORTS_DEFAULT)
+	for port in ports:
+		s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+		try:
+			s.settimeout(timeout)
+			s.connect((ip, port))
+			return port                      # connected — device is alive
+		except ConnectionRefusedError:
+			return port                      # port closed but device answered the SYN
+		except (socket.timeout, OSError):
+			pass                             # no response on this port — try next
+		finally:
+			try:
+				s.close()
+			except Exception:
+				pass
+	return None
 
 
 def _arp_ping(ip: str, iface: str, timeout: int = 2) -> bool:
-	"""Check reachability via ping (built-in macOS tool, no root required)."""
-	return _ping(ip, timeout)
+	"""Check reachability: ping first; if ping fails fall back to curl TCP probe."""
+	return _ping(ip, timeout) or (_curl_check(ip) is not None)
 
 
 def _local_subnet(iface: str):
-	"""
-	Return (network_str, cidr) e.g. ('192.168.1.0', 24)
-	by parsing `ifconfig` output.  Returns None on failure.
+	"""Return (network_str, cidr) e.g. ('192.168.1.0', 24) by parsing ifconfig output.
+
+	ifconfig output for an active interface looks like:
+	  en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+	          inet 192.168.1.100 netmask 0xffffff00 broadcast 192.168.1.255
+	We look for the 'inet' line and parse the IP and subnet mask.
+	macOS reports the mask as a hex string (0xffffff00); older systems and Linux
+	use dotted-decimal (255.255.255.0).  Both forms are handled.
+	CIDR prefix length is derived by counting the 1-bits in the 32-bit mask.
+	Returns None on any failure (interface down, not found, parse error).
 	"""
 	try:
+		# Query the interface configuration — stderr suppressed (interface may be down)
 		out = subprocess.check_output(["/sbin/ifconfig", iface], text=True, stderr=subprocess.DEVNULL)
+
+		# Match: inet <ip>  netmask <hex-or-dotted>
 		m = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)\s+netmask\s+(0x[0-9a-fA-F]+|\d+\.\d+\.\d+\.\d+)", out)
 		if not m:
 			return None
 		ip_str, mask_str = m.group(1), m.group(2)
+
+		# Convert mask to a 32-bit integer regardless of format
 		if mask_str.startswith("0x"):
-			mask_int = int(mask_str, 16)
+			mask_int = int(mask_str, 16)                                  # hex → int
 		else:
-			parts = [int(p) for p in mask_str.split(".")]
+			parts    = [int(p) for p in mask_str.split(".")]
 			mask_int = (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]
-		cidr    = bin(mask_int).count("1")
-		ip_int  = struct.unpack("!I", socket.inet_aton(ip_str))[0]
-		net_int = ip_int & mask_int
-		net_str = socket.inet_ntoa(struct.pack("!I", net_int))
+
+		cidr    = bin(mask_int).count("1")                                # count set bits for prefix length
+		ip_int  = struct.unpack("!I", socket.inet_aton(ip_str))[0]       # IP string → 32-bit network-order int
+		net_int = ip_int & mask_int                                       # mask off host bits → network address
+		net_str = socket.inet_ntoa(struct.pack("!I", net_int))           # 32-bit int → dotted-decimal string
 		return net_str, cidr
 	except Exception:
 		return None
@@ -369,10 +511,6 @@ class Plugin(indigo.PluginBase):
 
 		# Build active log-areas list from prefs (no log output yet)
 		self.setLogFromPrefs(self.pluginPrefs, writeToLog=False)
-
-		# Register SIGTERM handler so Indigo's "polite stop" exits immediately
-		# without waiting for the IPC message pump
-		signal.signal(signal.SIGTERM, self._on_sigterm)
 
 		# MAC → {ip, last_seen (epoch), online (bool), indigo_device_id}
 		self._known: dict      = {}
@@ -439,20 +577,28 @@ class Plugin(indigo.PluginBase):
 
 	def startup(self):
 		grace = self._grace_period_secs()
-		self.indiLOG.log(20, f"Network Scanner starting up…  (offline grace period: {grace} s)")
-		self._startup_time = time.time()   # offline grace period starts here
+		self.indiLOG.log(20, f"Network Scanner starting up…  (offline ignore period: {grace} s)")
+		self._startup_time = time.time()
 		self._stop_event.clear()
-		self._rename_existing_net_devices()
-		self._move_existing_net_devices()
+		self._rename_and_move_net_devices()       # single pass: rename + move
+		#self.indiLOG.log(20, f"startup: rename/move done  ")
+		self._backfill_history_from_devices()
+		#self.indiLOG.log(20, f"startup: backfill done ")
 		self._start_threads()
-		# Port scans are now launched per-device from deviceStartComm().
+		self.indiLOG.log(20, f"Network Scanner active")
 
-	def _on_sigterm(self, signum, frame):
-		"""SIGTERM handler — Indigo's polite stop signal."""
-		self._stop_event.set()
-		self._kill_tcpdump()
-		self._save_state_fast()
-		os._exit(0)
+
+
+	def _getPrefixName(self):
+		return self.pluginPrefs.get("prefixName",kDefaultPluginPrefs["prefixName"]).strip()
+
+	def _is_auto_name(self, name: str, mac: str) -> bool:
+		"""Return True if name was auto-generated (starts with Net_<MAC>).
+		Used to decide whether it is safe to rename the device.
+		"""
+		return name.startswith(self._getPrefixName() + mac.upper())
+
+
 
 	def _kill_tcpdump(self):
 		"""Kill the tcpdump subprocess.
@@ -472,47 +618,21 @@ class Plugin(indigo.PluginBase):
 			# processed the EOF yet, causing a race on the TextIOWrapper internal lock.
 			# The fd is released automatically when the Popen object is GC'd.
 
-	def _save_state_fast(self):
-		"""Lockless best-effort state save for use in shutdown paths.
-
-		We deliberately skip _known_lock here: acquiring a lock that a scan/sniff
-		thread might be holding would block the main thread indefinitely, preventing
-		os._exit(0) from being reached and causing macOS to wait 20 s before SIGKILL.
-		A slightly inconsistent snapshot is better than a hung process.
-		"""
-		try:
-			snapshot = dict(self._known)   # shallow copy without lock — fine on CPython
-			with open(self.stateFile, "w") as f:
-				json.dump(snapshot, f, indent=2)
-		except Exception:
-			pass   # never log here — Indigo IPC may already be gone
-
-	def shutdown(self):
-		"""Called by Indigo after runConcurrentThread exits."""
-		self._stop_event.set()
-		self._kill_tcpdump()
-		self._save_state_fast()
-		os._exit(0)
-
 	def runConcurrentThread(self):
 		"""Indigo's cooperative loop – sleep in 1 s steps so stop is near-instant."""
+		in_grace_period = True
 		try:
 			while True:
 				self.sleep(1)
+				if in_grace_period:
+					in_grace_period = (time.time() - self._startup_time) < self._grace_period_secs()
+					if not in_grace_period:
+						self.indiLOG.log(20, f"startup finished, offline ignore period ended")
+					
+					
+
 		except self.StopThread:
 			pass
-
-	def stopConcurrentThread(self):
-		self._stop_event.set()
-		super().stopConcurrentThread()   # raises StopThread inside runConcurrentThread
-		# Kill tcpdump immediately — its open stdout pipe is what keeps
-		# the Python process alive after Indigo's polite stop signal.
-		proc = self._sniff_proc
-		if proc and proc.poll() is None:
-			try:
-				proc.kill()
-			except Exception:
-				pass
 
 	# ------------------------------------------------------------------
 	# Preferences
@@ -521,9 +641,14 @@ class Plugin(indigo.PluginBase):
 	def closedPrefsConfigUi(self, valuesDict, userCancelled):
 		if not userCancelled:
 			self.setLogFromPrefs(valuesDict)
-			# Restart threads so new interface/interval settings take effect
+			# Signal all threads to stop
 			self._stop_event.set()
-			time.sleep(2)
+			self._kill_tcpdump()
+			# Join with short timeout — scan/sniff threads check stop_event every 0.1–0.2 s
+			# so they should exit well within 1 second.  Never block the main thread longer.
+			for t in (self._scan_thread, self._sniff_thread):
+				if t and t.is_alive():
+					t.join(timeout=1.0)
 			self._stop_event.clear()
 			self._start_threads()
 
@@ -532,10 +657,19 @@ class Plugin(indigo.PluginBase):
 	# ------------------------------------------------------------------
 
 	def deviceStartComm(self, dev):
-		# Tell Indigo to refresh the device's state list against the current
-		# Devices.xml definition.  Required for existing devices to pick up
-		# newly added states (e.g. openPorts) without recreating the device.
-		dev.stateListOrDisplayStateIdChanged()
+		# Refresh the state list only when Devices.xml schema has changed.
+		# Calling stateListOrDisplayStateIdChanged() on every restart for every
+		# device is an expensive Indigo API round-trip.  We store the schema
+		# version in pluginProps and skip the call on normal restarts.
+		stored_schema = dev.pluginProps.get("schemaVersion", "")
+		if stored_schema != SCHEMA_VERSION:
+			dev.stateListOrDisplayStateIdChanged()
+			try:
+				props = dev.pluginProps.copy()
+				props["schemaVersion"] = SCHEMA_VERSION
+				dev.replacePluginPropsOnServer(props)
+			except Exception:
+				pass
 
 		mac = dev.states.get("macAddress", "")
 		if mac:
@@ -601,13 +735,14 @@ class Plugin(indigo.PluginBase):
 		iface    = self.pluginPrefs.get("networkInterface", "en0").strip() or "en0"
 		sniff_on = self.pluginPrefs.get("sniffEnabled", True)
 		sweep_on = self.pluginPrefs.get("arpSweepEnabled", True)
+		password = self.pluginPrefs.get("sudoPassword", "").strip()
 
 		if sniff_on:
 			self._sniff_thread = threading.Thread(
-				target=self._sniff_loop, args=(iface,), daemon=True, name="NS-Sniff"
+				target=self._sniff_loop, args=(iface, password), daemon=True, name="NS-Sniff"
 			)
 			self._sniff_thread.start()
-			self.indiLOG.log(20, f"ARP sniffer (tcpdump) started on {iface}")
+			self.indiLOG.log(20, f"traffic sniffer (tcpdump) started on {iface}")
 		else:
 			self.indiLOG.log(20, "Passive ARP sniffing disabled.")
 
@@ -617,59 +752,127 @@ class Plugin(indigo.PluginBase):
 		self._scan_thread.start()
 		self.indiLOG.log(20, "Device scan loop started.")
 
+		# Periodic state-file save — every 2 minutes, independent of scan interval.
+		# Ensures known_devices.json (including history) is never more than 2 min stale.
+		threading.Thread(
+			target=self._save_loop, daemon=True, name="NS-Save"
+		).start()
+
+	def _save_loop(self):
+		"""Write known_devices.json every 2 minutes, independent of scan timing.
+
+		Uses stop_event.wait(120) so it exits immediately when the plugin stops —
+		no sleep loop needed and no risk of blocking shutdown.
+		"""
+		while not self._stop_event.is_set():
+			self._stop_event.wait(timeout=120)   # wake after 2 min or on stop
+			if not self._stop_event.is_set():    # skip save on clean shutdown (shutdown() handles it)
+				self._save_state()
+
 	# ------------------------------------------------------------------
 	# Sniff loop (tcpdump subprocess — no root required)
 	# ------------------------------------------------------------------
 
-	def _sniff_loop(self, iface: str):
+	def _sniff_loop(self, iface: str, password: str = ""):
 		"""
-		Passively capture ARP packets using tcpdump subprocess.
-		tcpdump on macOS has the necessary entitlements and does not
-		require the plugin to run as root.
-		Example tcpdump lines parsed:
-		  14:23:11.456789 ARP, Request who-has 192.168.1.1 tell 192.168.1.45
-		  14:23:11.457123 ARP, Reply 192.168.1.1 is-at a4:91:b1:ff:12:34
+		Passively capture ALL ethernet traffic via tcpdump to detect any active device.
+
+		Each tcpdump line with -e looks like:
+		  HH:MM:SS.ffffff  aa:bb:cc:dd:ee:ff > ff:ff:ff:ff:ff:ff, ethertype ARP (0x0806), length 42: ARP, Reply 192.168.1.1 is-at a4:91:b1:12:34:56
+		  HH:MM:SS.ffffff  aa:bb:cc:dd:ee:ff > bb:cc:dd:ee:ff:00, ethertype IPv4 (0x0800), length 64: 192.168.1.45.54321 > 192.168.1.1.80: ...
+
+		Parsing strategy:
+		  1. ARP Reply  → definitive MAC+IP pair, register immediately
+		  2. Any frame  → source MAC from ethernet header + source IP from IPv4 payload
+		     Throttled: each MAC is registered at most once every 5 s to avoid
+		     hammering _register_device on every packet of a busy device.
+
+		If password is set, tcpdump is launched via  echo <pw> | sudo -S tcpdump …
+		so that it can open the raw network socket without granting Indigo full root.
 		"""
-		_reply_re = re.compile(
+		# ARP Reply: "ARP, Reply 1.2.3.4 is-at aa:bb:cc:dd:ee:ff"
+		_arp_reply_re = re.compile(
 			r"ARP,\s+Reply\s+([\d.]+)\s+is-at\s+([0-9a-f:]{17})", re.IGNORECASE
 		)
-		_ether_re = re.compile(
-			r"([0-9a-f:]{17})\s+>\s+[0-9a-f:]{17}.*?ARP.*?tell\s+([\d.]+)",
-			re.IGNORECASE,
-		)
+		# Source MAC from the ethernet header (first field after timestamp)
+		_src_mac_re = re.compile(r"^\S+\s+([0-9a-f:]{17})\s+>", re.IGNORECASE)
+		# Source IP from IPv4 payload: "length N: W.X.Y.Z.port >"
+		_src_ip_re  = re.compile(r"length \d+:\s+([\d]+\.[\d]+\.[\d]+\.[\d]+)\.\d+\s+>")
+
+		_throttle: dict = {}   # mac → last time _register_device was called
+		_THROTTLE_SECS  = 30.0 # minimum seconds between registrations per MAC
+
+		# Targeted BPF filter: capture only frame types that signal device presence.
+		# ARP covers discovery and IP changes; mDNS (5353) catches Apple/IoT/Chromecast;
+		# DHCP (67/68) catches every device the moment it connects.
+		# This reduces packet volume by ~95% vs capturing all traffic.
+		_BPF = "arp or (udp port 5353) or (udp port 67) or (udp port 68)"
 
 		while not self._stop_event.is_set():
 			try:
-				proc = subprocess.Popen(
-					["/usr/sbin/tcpdump", "-i", iface, "-n", "-e", "-l", "arp"],
-					stdout=subprocess.PIPE,
-					stderr=subprocess.DEVNULL,
-					text=True,
-					bufsize=1,
-				)
+				if password:
+					# Single shell command: echo pipes the password into sudo -S
+					shell_cmd = f"echo {password} | sudo -S /usr/sbin/tcpdump -i {iface} -n -e -l {_BPF}"
+					proc = subprocess.Popen(
+						shell_cmd,
+						shell=True,
+						stdout=subprocess.PIPE,
+						stderr=subprocess.DEVNULL,
+					)
+				else:
+					proc = subprocess.Popen(
+						["/usr/sbin/tcpdump", "-i", iface, "-n", "-e", "-l", _BPF],
+						stdout=subprocess.PIPE,
+						stderr=subprocess.DEVNULL,
+					)
 				self._sniff_proc = proc
-				# Use select() so we check stop_event every 0.2 s
-				# even when the network is quiet and tcpdump has no output
+				fd  = proc.stdout.fileno()
+				buf = b""
 				while not self._stop_event.is_set():
 					ready, _, _ = select.select([proc.stdout], [], [], 0.2)
 					if not ready:
-						continue          # timeout — loop back and check stop_event
-					line = proc.stdout.readline()
-					if not line:
-						break             # tcpdump exited
-					# Parse Reply lines → definitive MAC→IP mapping
-					m = _reply_re.search(line)
-					if m:
-						ip, mac = m.group(1), m.group(2).lower()
-						if mac != "00:00:00:00:00:00":
-							self._register_device(mac, ip)
 						continue
-					# Parse Request lines → sender MAC + IP
-					m2 = _ether_re.search(line)
-					if m2:
-						mac, ip = m2.group(1).lower(), m2.group(2)
-						if mac != "00:00:00:00:00:00":
-							self._register_device(mac, ip)
+					try:
+						chunk = os.read(fd, 4096)
+					except OSError:
+						break
+					if not chunk:
+						break
+					buf += chunk
+					while b"\n" in buf:
+						raw, buf = buf.split(b"\n", 1)
+						line = raw.decode("ascii", errors="replace")
+						now  = time.time()
+
+						# ── ARP Reply: definitive MAC→IP, always register ──────────
+						m = _arp_reply_re.search(line)
+						if m:
+							ip  = m.group(1)
+							mac = m.group(2).lower()
+							if mac not in ("00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff"):
+								_throttle[mac] = now
+								self._register_device(mac, ip)
+							continue
+
+						# ── All other frames: src MAC + src IP (IPv4 only) ─────────
+						mm = _src_mac_re.match(line)
+						if not mm:
+							continue
+						mac = mm.group(1).lower()
+						# Skip broadcast and multicast MACs (LSB of first octet = 1)
+						if mac == "ff:ff:ff:ff:ff:ff" or (int(mac[:2], 16) & 1):
+							continue
+						# Throttle: skip if registered recently
+						if now - _throttle.get(mac, 0) < _THROTTLE_SECS:
+							continue
+						# Need an IP — only IPv4 frames have one we can parse
+						mi = _src_ip_re.search(line)
+						if not mi:
+							continue
+						ip = mi.group(1)
+						_throttle[mac] = now
+						self._register_device(mac, ip)
+
 			except Exception as e:
 				if f"{e}".find("None") == -1: self.indiLOG.log(40, f"Sniff error: {e}", exc_info=True)
 			finally:
@@ -688,6 +891,12 @@ class Plugin(indigo.PluginBase):
 		  1. ARP-sweep the local subnet to find new devices.
 		  2. Ping all known devices to update online/offline state.
 		"""
+		# Short startup pause so all deviceStartComm() calls complete before
+		# the first sweep.  Uses stop_event so shutdown exits immediately.
+		self._stop_event.wait(timeout=4)
+		if self._stop_event.is_set():
+			return
+
 		while not self._stop_event.is_set():
 			interval = int(self.pluginPrefs.get("scanInterval", 60))
 
@@ -723,25 +932,38 @@ class Plugin(indigo.PluginBase):
 			return
 		net_str, cidr = subnet_info
 		if self.decideMyLog("Sweep"):
-			self.indiLOG.log(20, f"ARP sweep (ping+arp) → {net_str}/{cidr}")
+			self.indiLOG.log(10, f"ARP sweep (ping+arp) → {net_str}/{cidr}")
 		try:
 			ip_int     = struct.unpack("!I", socket.inet_aton(net_str))[0]
 			host_count = min((1 << (32 - cidr)) - 2, 254)   # cap at /24
 
-			responded   = set()          # IPs that replied to ping this cycle
-			resp_lock   = threading.Lock()
+			responded        = set()          # IPs that replied to ping or curl this cycle
+			resp_lock        = threading.Lock()
+			curl_ports_by_ip = {}             # ip → winning curl port (only curl hits)
+			curl_lock        = threading.Lock()
+
+			# Pre-build ip → last known curl port so _ping_host can pass preferred_port
+			with self._known_lock:
+				ip_to_curl_port = {e.get("ip"): e.get("curlPort")
+				                   for e in self._known.values() if e.get("ip")}
+
+			log_ping = self.decideMyLog("Ping")
 
 			def _ping_host(ip):
-				try:
-					r = subprocess.run(
-						["/sbin/ping", "-c", "1", "-W", "1000", "-t", "1", ip],
-						stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3
-					)
-					if r.returncode == 0:
-						with resp_lock:
-							responded.add(ip)
-				except Exception:
-					pass
+				alive = _ping(ip)
+				if log_ping:
+					self.indiLOG.log(10, f"sweep ping  {ip}  {'ok' if alive else 'fail'}")
+				if not alive:
+					port  = _curl_check(ip, preferred_port=ip_to_curl_port.get(ip))
+					alive = port is not None
+					if log_ping and port is not None:
+						self.indiLOG.log(10, f"sweep probe {ip}  ok port {port}")
+					if port is not None:
+						with curl_lock:
+							curl_ports_by_ip[ip] = port
+				if alive:
+					with resp_lock:
+						responded.add(ip)
 
 			threads = []
 			for i in range(1, host_count + 1):
@@ -760,27 +982,50 @@ class Plugin(indigo.PluginBase):
 				return
 
 			result = subprocess.run(
-				["/usr/sbin/arp", "-a", "-i", iface],
+				[
+					"/usr/sbin/arp",
+					"-a",         # show ALL entries in the kernel ARP cache
+					"-i", iface,  # limit output to entries learned on this interface
+				],
 				stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
 				timeout=10, text=True
 			)
-			arp_re   = re.compile(r"\((\d+\.\d+\.\d+\.\d+)\)\s+at\s+([0-9a-f:]{17})", re.IGNORECASE)
+			# macOS arp -a output format (one line per cached entry):
+			#   hostname.local (192.168.1.42) at aa:bb:cc:dd:ee:ff on en0 ifscope [ethernet]
+			#   ?              (192.168.1.99) at cc:dd:ee:ff:00:11 on en0 ifscope [ethernet]
+			# '?' means the device has not announced a hostname via mDNS/Bonjour.
+			# A dotted-decimal string (same as the IP) means the OS only knows the IP.
+			# Real hostnames come from the OS mDNS/Bonjour cache (Avahi / mdnsResponder).
+			# Group 1 = raw name ('?' or hostname), Group 2 = IP, Group 3 = MAC
+			arp_re   = re.compile(
+				r"^(\S+)\s+\((\d+\.\d+\.\d+\.\d+)\)\s+at\s+([0-9a-f:]{17})",
+				re.IGNORECASE
+			)
 			seen_n   = 0
 			discov_n = 0
 			for line in result.stdout.splitlines():
 				m = arp_re.search(line)
 				if m:
-					ip, mac = m.group(1), m.group(2).lower()
+					raw_name, ip, mac = m.group(1), m.group(2), m.group(3).lower()
+					# Discard '?' and bare IP strings — they are not useful local names
+					if raw_name == "?" or re.match(r"^\d+\.\d+\.\d+\.\d+$", raw_name):
+						local_name = ""
+					else:
+						local_name = raw_name.rstrip(".")  # strip trailing dot from FQDN
 					if mac == "ff:ff:ff:ff:ff:ff":
 						continue
 					if ip in responded:
-						self._register_device(mac, ip)   # actively replied → update last_seen
+						self._register_device(mac, ip, local_name=local_name)   # actively replied → update last_seen
 						seen_n += 1
 					else:
-						self._discover_device(mac, ip)   # stale cache → discover only
+						self._discover_device(mac, ip, local_name=local_name)   # stale cache → discover only
 						discov_n += 1
+					# Store the winning curl port (or None if ping sufficed / not reachable)
+					with self._known_lock:
+						if mac in self._known:
+							self._known[mac]["curlPort"] = curl_ports_by_ip.get(ip)
 			if self.decideMyLog("Sweep"):
-				self.indiLOG.log(20,
+				self.indiLOG.log(10,
 					f"ARP sweep complete on {net_str}/{cidr}: "
 					f"{seen_n} device(s) replied to ping (online), "
 					f"{discov_n} in ARP cache but no ping reply (likely offline / stale)"
@@ -792,7 +1037,7 @@ class Plugin(indigo.PluginBase):
 		"""Ping all known devices in parallel and update online/offline state.
 
 		Per-device props read from Indigo pluginProps:
-		  pingMode         – "both" | "online" | "offline" | "confirm" | "none"
+		  pingMode         – "both" | "online" | "offline" | "confirm" | "pingOnly" | "none"
 		  pingOfflineLogic – "and"  (timeout AND streak) | "or" (timeout OR streak)
 		  pingMissedCount  – consecutive failed pings required before offline (default 1)
 		  offlineThreshold – per-device override; 0 = use plugin-wide default
@@ -822,6 +1067,42 @@ class Plugin(indigo.PluginBase):
 			if dev.states.get("macAddress", "")
 		}
 
+		_CURL_USELESS_LIMIT = 5   # consecutive all-port failures before skipping curl
+
+		log_ping = self.decideMyLog("Ping")
+
+		def _do_probe(ip, mac, entry, ping_only=False):
+			"""Ping first; if blocked fall back to TCP socket probe (unless ping_only=True).
+			Updates _known[mac]['curlPort']. Logs results if Log Ping is enabled.
+			"""
+			dev_name = names_by_mac.get(mac, mac)
+			ping_ok  = _ping(ip)
+			if log_ping:
+				self.indiLOG.log(10, f"ping  {dev_name} ({ip})  {'ok' if ping_ok else 'fail'}")
+			if ping_ok:
+				with self._known_lock:
+					e = self._known.setdefault(mac, {})
+					e.setdefault("curlPort", None)
+					e["curlUseless"] = 0
+				return True
+			if ping_only:
+				return False
+			# Skip TCP probe if it has never worked for this device
+			if entry.get("curlUseless", 0) >= _CURL_USELESS_LIMIT:
+				if log_ping:
+					self.indiLOG.log(10, f"probe {dev_name} ({ip})  skipped (marked useless)")
+				return False
+			port = _curl_check(ip, preferred_port=entry.get("curlPort"))
+			if log_ping:
+				self.indiLOG.log(10,
+					f"probe {dev_name} ({ip})  {'ok port ' + str(port) if port else 'fail all ports'}"
+				)
+			with self._known_lock:
+				e = self._known.setdefault(mac, {})
+				e["curlPort"]    = port
+				e["curlUseless"] = 0 if port is not None else (entry.get("curlUseless", 0) + 1)
+			return port is not None
+
 		def _check_one(mac, entry):
 			if self._stop_event.is_set():
 				return
@@ -841,6 +1122,7 @@ class Plugin(indigo.PluginBase):
 			offline_logic     = "and"    # "and" | "or"
 			missed_needed     = 1        # consecutive failures required
 			offline_threshold = plugin_offline_threshold
+			ping_only         = False    # derived from ping_mode == "pingOnly"
 			dev_id            = entry.get("indigo_device_id")
 			if dev_id:
 				try:
@@ -853,6 +1135,10 @@ class Plugin(indigo.PluginBase):
 						offline_threshold = dev_thresh
 				except Exception:
 					pass
+			# "pingOnly" is a ping_mode value meaning "confirm + no TCP fallback"
+			if ping_mode == "pingOnly":
+				ping_only = True
+				ping_mode = "both"
 
 			silent_secs = now - last_seen
 			timed_out   = silent_secs > offline_threshold
@@ -877,7 +1163,7 @@ class Plugin(indigo.PluginBase):
 					with results_lock:
 						results[mac] = (entry.get("online", True), last_seen, 0)
 					return
-				ping_ok = _arp_ping(ip, iface)
+				ping_ok = _do_probe(ip, mac, entry, ping_only=ping_only)
 				if ping_ok:
 					new_streak    = 0
 					online        = True
@@ -899,7 +1185,7 @@ class Plugin(indigo.PluginBase):
 			# ── online-only mode ─────────────────────────────────────────────
 			# Ping success → online; failure never causes offline.
 			if ping_mode == "online":
-				ping_ok = _arp_ping(ip, iface)
+				ping_ok = _do_probe(ip, mac, entry, ping_only=ping_only)
 				if ping_ok:
 					with results_lock:
 						results[mac] = (True, now, 0)
@@ -911,7 +1197,7 @@ class Plugin(indigo.PluginBase):
 			# ── both / offline modes ─────────────────────────────────────────
 			# Ping success always resets streak.
 			# Ping failure increments streak; offline decision depends on logic + streak.
-			ping_ok = _arp_ping(ip, iface)
+			ping_ok = _do_probe(ip, mac, entry, ping_only=ping_only)
 
 			if ping_ok:
 				new_streak    = 0
@@ -966,40 +1252,60 @@ class Plugin(indigo.PluginBase):
 	# Device registry
 	# ------------------------------------------------------------------
 
-	def _discover_device(self, mac: str, ip: str):
+	def _discover_device(self, mac: str, ip: str, local_name: str = ""):
 		"""Called for stale ARP-cache entries that did NOT respond to ping this sweep.
 
 		Updates IP mapping and creates the Indigo device if needed, but intentionally
 		does NOT update last_seen or set online=True — those fields must only change
 		when the device is genuinely reachable.
+		local_name is the mDNS/Bonjour hostname from the arp -a output (empty if unknown).
 		"""
 		if mac.lower() in self._ignored_macs:
 			return
 		with self._known_lock:
 			entry = self._known.get(mac, {})
 			if not entry:                         # brand-new MAC — seed a minimal entry
-				entry["online"]    = False
-				entry["last_seen"] = 0
+				entry["online"]     = False
+				entry["last_seen"]  = 0
+				entry["history"]    = []
+				entry["local_name"] = ""
+				entry["name"]       = ""
+			entry.setdefault("history",    [])    # backfill for entries added before history existed
+			entry.setdefault("local_name", "")    # backfill for entries added before local_name existed
+			entry.setdefault("name",       "")    # backfill for entries added before name existed
+			entry.setdefault("curlPort",   None)  # last curl port that responded
+			entry.setdefault("curlUseless", 0)   # consecutive all-port curl failures
 			entry["ip"] = ip
+			if local_name:                        # only overwrite with a real name, never with empty
+				entry["local_name"] = local_name
 			if "vendor" not in entry:
 				entry["vendor"] = self.get_vendor(mac)
 			self._known[mac] = entry
 		# Ensure an Indigo device exists, but do not update online state
-		self._ensure_indigo_device(mac, ip, entry.get("vendor", ""), entry.get("online", False))
+		self._ensure_indigo_device(mac, ip, entry.get("vendor", ""), entry.get("online", False),
+		                           local_name=entry.get("local_name", ""))
 
-	def _register_device(self, mac: str, ip: str):
-		"""
-		Add or update a MAC entry, then create or refresh the Indigo device.
-		Called from sniff thread and ping-confirmed sweep hits.
+	def _register_device(self, mac: str, ip: str, local_name: str = ""):
+		"""Add or update a MAC entry, then create or refresh the Indigo device.
+
+		Called from the sniff thread (passive ARP) and from ping-confirmed sweep hits.
+		local_name is the mDNS/Bonjour hostname parsed from arp -a output (empty string
+		when the device has not announced a name, i.e. arp -a showed '?').
+		Only the ARP sweep populates local_name; sniff-thread calls leave it empty.
 		"""
 		if mac.lower() in self._ignored_macs:
 			if self.decideMyLog("Ignored"):
-				self.indiLOG.log(20, f"Ignored MAC skipped: {mac}")
+				self.indiLOG.log(10, f"Ignored MAC skipped: {mac}")
 			return
 
 		now = time.time()
 		with self._known_lock:
 			entry      = self._known.get(mac, {})
+			entry.setdefault("history",    [])    # ensure key present on every entry
+			entry.setdefault("local_name", "")    # ensure key present on every entry
+			entry.setdefault("name",       "")    # ensure key present on every entry
+			entry.setdefault("curlPort",   None)  # last curl port that responded
+			entry.setdefault("curlUseless", 0)   # consecutive all-port curl failures
 			changed_ip = entry.get("ip") != ip
 			old_ip     = entry.get("ip", "")
 			prev_seen  = entry.get("last_seen", 0)
@@ -1022,6 +1328,8 @@ class Plugin(indigo.PluginBase):
 			entry["last_seen"]      = now
 			entry["last_seen_str"]  = datetime.datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M:%S")
 			entry["online"]         = True
+			if local_name:                        # only overwrite with a real name, never with empty
+				entry["local_name"] = local_name
 			if "vendor" not in entry:
 				entry["vendor"] = self.get_vendor(mac)
 			self._known[mac] = entry
@@ -1039,20 +1347,19 @@ class Plugin(indigo.PluginBase):
 				pass
 
 		# Global "seen" flag → Indigo event log (level 20)
-		if self.decideMyLog("Seen"):
-			self.indiLOG.log(20, f"Seen: {mac}  IP={ip}  vendor={entry['vendor']}")
-		# Per-device seen flag → plugin.log only (level 10, below indigo_log_handler threshold)
-		if log_seen_to_file:
+		if self.decideMyLog("Seen") or log_seen_to_file:
 			self.indiLOG.log(10, f"Seen: {mac}  IP={ip}  vendor={entry['vendor']}")
+
 		# IP-change log — honoured unless suppressed for this device
 		if changed_ip and old_ip and self.decideMyLog("IpChange") and not suppress_ip_log:
 			self.indiLOG.log(20, f"IP changed: {mac}  {old_ip} → {ip}")
 
-		self._ensure_indigo_device(mac, ip, entry["vendor"], True)
+		self._ensure_indigo_device(mac, ip, entry["vendor"], True,
+		                           local_name=entry.get("local_name", ""))
 
-	def _ensure_indigo_device(self, mac: str, ip: str, vendor: str, online: bool):
+	def _ensure_indigo_device(self, mac: str, ip: str, vendor: str, online: bool, local_name: str = ""):
 		"""Create the Indigo device if it doesn't exist, then update its states."""
-		dev_name = _mac_to_device_name(mac, vendor)
+		dev_name = _mac_to_device_name(mac, vendor, local_name=local_name, prefixName = self._getPrefixName())
 		existing = None
 		for dev in indigo.devices.iter(PLUGIN_ID):
 			if dev.states.get("macAddress", "").lower() == mac.lower():
@@ -1063,7 +1370,7 @@ class Plugin(indigo.PluginBase):
 			existing = self._create_indigo_device(mac, ip, vendor, dev_name)
 
 		if existing is not None:
-			self._update_indigo_device_states(existing, mac, ip, vendor, online)
+			self._update_indigo_device_states(existing, mac, ip, vendor, online, local_name=local_name)
 
 	def _create_indigo_device(self, mac: str, ip: str, vendor: str, name: str):
 		"""Create a brand-new Indigo networkDevice."""
@@ -1087,7 +1394,9 @@ class Plugin(indigo.PluginBase):
 			if self.decideMyLog("NewDevice"):
 				self.indiLOG.log(20, f"Created device '{name}' for {mac}  IP={ip}  ({vendor})")
 			with self._known_lock:
-				self._known.setdefault(mac, {})["indigo_device_id"] = new_dev.id
+				e = self._known.setdefault(mac, {})
+				e["indigo_device_id"] = new_dev.id
+				e["name"]             = new_dev.name
 			# Port-scan the new device in a background thread
 			dev_id = new_dev.id
 			threading.Thread(
@@ -1099,26 +1408,31 @@ class Plugin(indigo.PluginBase):
 			if f"{e}".find("None") == -1: self.indiLOG.log(40, f"Failed to create device for {mac}: {e}", exc_info=True)
 			return None
 
-	def _update_indigo_device_states(self, dev, mac: str, ip: str, vendor: str, online: bool):
+	def _update_indigo_device_states(self, dev, mac: str, ip: str, vendor: str, online: bool, local_name: str = ""):
 		"""Push only changed state values into an existing Indigo device.
 
 		lastOnOffChange is only written when the online/offline value flips.
 		last_seen (last ARP/ping ok epoch) lives only in _known — never pushed
 		to Indigo, so routine scan hits produce zero device updates.
+		localName is the mDNS/Bonjour hostname from arp -a; only updated when non-empty
+		so a previously discovered name is never erased by a sniff-thread update.
 		"""
-		prev_online  = dev.states.get("onOffState",  None)
-		prev_ip      = dev.states.get("ipAddress",   "")
-		prev_mac     = dev.states.get("macAddress",  "")
-		prev_vendor  = dev.states.get("vendorName",  "")
-		prev_created = dev.states.get("created",     "")
+		prev_online     = dev.states.get("onOffState",  None)
+		prev_ip         = dev.states.get("ipAddress",   "")
+		prev_mac        = dev.states.get("macAddress",  "")
+		prev_vendor     = dev.states.get("vendorName",  "")
+		prev_created    = dev.states.get("created",     "")
+		prev_local_name = dev.states.get("localName",   "")
 
-		online_changed = (prev_online is None) or (bool(prev_online) != online)
-		ip_changed     = prev_ip     != ip
-		mac_changed    = prev_mac    != mac
-		vendor_changed = prev_vendor != vendor
-		created_needed = not prev_created
+		online_changed     = (prev_online is None) or (bool(prev_online) != online)
+		ip_changed         = prev_ip     != ip
+		mac_changed        = prev_mac    != mac
+		vendor_changed     = prev_vendor != vendor
+		created_needed     = not prev_created
+		# Only update localName when we have a real name AND it differs from stored
+		local_name_changed = bool(local_name) and local_name != prev_local_name
 
-		if not any([online_changed, ip_changed, mac_changed, vendor_changed, created_needed]):
+		if not any([online_changed, ip_changed, mac_changed, vendor_changed, created_needed, local_name_changed]):
 			return   # nothing to update — no Indigo server calls
 
 		if online_changed and self.decideMyLog("StateChange"):
@@ -1143,14 +1457,26 @@ class Plugin(indigo.PluginBase):
 				"uiValue": f"{'on' if online else 'off'}  {ts}",
 			})
 			state_updates.append({"key": "lastOnOffChange", "value": ts})
+			# Append to the rolling on/off history kept in _known (last 10 events).
+			# This is stored in our own JSON state file, not in Indigo device states,
+			# so it survives device deletions and plugin reinstalls.
+			with self._known_lock:
+				entry   = self._known.get(mac, {})
+				history = entry.get("history", [])
+				history.append({"ts": ts, "state": "on" if online else "off"})
+				entry["history"] = history[-10:]   # cap at 10 entries
+				entry["name"]    = dev.name        # keep Indigo device name in sync
+				self._known[mac] = entry
 		if ip_changed:
-			state_updates.append({"key": "ipAddress",  "value": ip})
+			state_updates.append({"key": "ipAddress",   "value": ip})
 		if mac_changed:
 			state_updates.append({"key": "macAddress",  "value": mac})
 		if vendor_changed:
 			state_updates.append({"key": "vendorName",  "value": vendor})
 		if created_needed:
 			state_updates.append({"key": "created",     "value": _now_str()})
+		if local_name_changed:
+			state_updates.append({"key": "localName",   "value": local_name})
 
 		try:
 			dev.updateStatesOnServer(state_updates)
@@ -1172,10 +1498,10 @@ class Plugin(indigo.PluginBase):
 					dev.description = padded_ip
 					dev.replaceOnServer()
 
-			# Rename device when vendor first becomes known and name is still auto-generated
-			if vendor_changed and vendor and vendor.lower() != "unknown":
-				if _is_auto_name(dev.name, mac):
-					correct = _mac_to_device_name(mac, vendor)
+			# Rename device when vendor or local name first becomes known and name is still auto-generated
+			if (vendor_changed and vendor and vendor.lower() != "unknown") or local_name_changed:
+				if self._is_auto_name(dev.name, mac):
+					correct = _mac_to_device_name(mac, vendor, local_name=local_name or prev_local_name, prefixName = self._getPrefixName())
 					if dev.name != correct:
 						dev.name = correct
 						dev.replaceOnServer()
@@ -1188,51 +1514,105 @@ class Plugin(indigo.PluginBase):
 		"""Update an existing device's states from the scan loop thread."""
 		for dev in indigo.devices.iter(PLUGIN_ID):
 			if dev.states.get("macAddress", "").lower() == mac.lower():
-				vendor = self._known.get(mac, {}).get("vendor", "Unknown")
-				self._update_indigo_device_states(dev, mac, ip, vendor, online)
+				entry      = self._known.get(mac, {})
+				vendor     = entry.get("vendor",     "Unknown")
+				local_name = entry.get("local_name", "")
+				self._update_indigo_device_states(dev, mac, ip, vendor, online, local_name=local_name)
 				break
 
 	# ------------------------------------------------------------------
 	# Folder helpers
 	# ------------------------------------------------------------------
 
-	def _rename_existing_net_devices(self):
-		"""Ensure auto-named Net_* devices have the correct name (MAC + vendor).
-		Only touches devices whose name starts with Net_<MAC> — user renames are preserved.
-		"""
-		renamed = 0
-		for dev in indigo.devices.iter(PLUGIN_ID):
-			mac    = dev.states.get("macAddress", "")
-			vendor = dev.states.get("vendorName", "")
-			if not mac: continue
-			if not _is_auto_name(dev.name, mac):
-				continue   # user has renamed this device — leave it alone
-			correct = _mac_to_device_name(mac, vendor)
-			if dev.name != correct:
-				try:
-					dev.name = correct
-					dev.replaceOnServer()
-					renamed += 1
-				except Exception as e:
-					self.indiLOG.log(30, f"Could not rename {dev.name} → {correct}: {e}")
-		if renamed:
-			self.indiLOG.log(20, f"Renamed {renamed} Net_* device(s).")
+	def _rename_and_move_net_devices(self):
+		"""Single startup pass: rename auto-named devices and move them to the target folder.
 
-	def _move_existing_net_devices(self):
-		"""Move any existing Net_* devices into the configured folder."""
+		Combined into one loop so we only iterate indigo.devices.iter(PLUGIN_ID) once —
+		far faster than the old approach of two separate passes, the second of which
+		iterated ALL Indigo devices (slow when the user has many devices).
+		"""
 		folder_id = self._get_or_create_folder()
-		if folder_id == 0:
-			return
-		moved = 0
-		for dev in indigo.devices:
-			if dev.name.startswith("Net_") and dev.folderId != folder_id:
+		renamed = moved = 0
+		for dev in indigo.devices.iter(PLUGIN_ID):
+			mac        = dev.states.get("macAddress", "")
+			vendor     = dev.states.get("vendorName", "")
+			local_name = dev.states.get("localName",  "")
+			changed    = False
+			# ── rename if auto-name is stale ──────────────────────────────
+			if mac and self._is_auto_name(dev.name, mac):
+				correct = _mac_to_device_name(mac, vendor, local_name=local_name, prefixName = self._getPrefixName())
+				if dev.name != correct:
+					try:
+						dev.name = correct
+						changed  = True
+						renamed += 1
+					except Exception as e:
+						self.indiLOG.log(30, f"Could not rename {dev.name} → {correct}: {e}")
+			# ── move to configured folder if needed ───────────────────────
+			if folder_id and dev.folderId != folder_id:
 				try:
-					indigo.device.moveToFolder(dev.id, value=folder_id)
+					if changed:
+						# replaceOnServer() handles both rename and folder move at once
+						dev.folderId = folder_id
+					else:
+						indigo.device.moveToFolder(dev.id, value=folder_id)
 					moved += 1
+					changed = False   # replaceOnServer below will cover it
 				except Exception as e:
 					self.indiLOG.log(30, f"Could not move {dev.name} to folder: {e}")
+			# ── one replaceOnServer call covers rename + any other prop changes ──
+			if changed:
+				try:
+					dev.replaceOnServer()
+				except Exception as e:
+					self.indiLOG.log(30, f"replaceOnServer failed for {dev.name}: {e}")
+		if renamed:
+			self.indiLOG.log(20, f"Renamed {renamed} Net_* device(s).")
 		if moved:
-			self.indiLOG.log(20, f"Moved {moved} Net_* device(s) to folder '{self.pluginPrefs.get('deviceFolder', 'Network Devices')}'")
+			folder_name = self.pluginPrefs.get("deviceFolder", "Network Devices")
+			self.indiLOG.log(20, f"Moved {moved} Net_* device(s) to folder '{folder_name}'.")
+
+	def _backfill_history_from_devices(self):
+		"""One-time startup backfill: seed history from Indigo device states for any
+		known entry whose history list is still empty.
+
+		Uses lastOnOffChange (timestamp) + onOffState (bool → 'on'/'off') to build
+		a single seed entry in the same format as the live history — {"ts": ..., "state": ...}.
+		Only touches entries with an empty history; devices that already have history
+		are left untouched.  Saves state file if any entries were updated.
+		"""
+		filled = 0
+		named  = 0
+		for dev in indigo.devices.iter(PLUGIN_ID):
+			mac = dev.states.get("macAddress", "").lower()
+			if not mac:
+				continue
+			with self._known_lock:
+				entry = self._known.get(mac, {})
+				if not entry:
+					continue   # not yet in _known — will be populated on first ARP sighting
+				changed = False
+				# Always sync the Indigo device name
+				if entry.get("name") != dev.name:
+					entry["name"] = dev.name
+					changed = True
+					named  += 1
+				# Seed history only when it is still empty
+				if not entry.get("history"):
+					state_str   = "on" if dev.states.get("onOffState", False) else "off"
+					last_change = dev.states.get("lastOnOffChange", "")
+					if last_change:
+						entry["history"] = [{"ts": last_change, "state": state_str}]
+						changed = True
+						filled += 1
+				if changed:
+					self._known[mac] = entry
+		msgs = []
+		if named:  msgs.append(f"name synced for {named}")
+		if filled: msgs.append(f"history seeded for {filled}")
+		if msgs:
+			self.indiLOG.log(20, f"Startup backfill: {', '.join(msgs)} device(s).")
+			self._save_state()
 
 	def _get_or_create_folder(self):
 		folder_name = self.pluginPrefs.get("deviceFolder", "").strip()
@@ -1254,8 +1634,11 @@ class Plugin(indigo.PluginBase):
 		"""Initialise the MAP2Vendor lookup table.
 
 		OUI files are stored next to the plugin state file.
-		The download is asynchronous — waitForMAC2vendor stays True until
-		the files arrive and the table is built.
+		MAP2Vendor.__init__ already calls makeFinalTable() internally when the
+		cached JSON is current, so we only call it again when the constructor
+		indicated it was NOT ready (i.e. a background download was started).
+		Calling makeFinalTable() twice was causing the large JSON file to be
+		read and parsed twice on every startup — now avoided.
 		"""
 		mac_files_dir = os.path.dirname(self.stateFile) + "/mac2Vendor/"
 		try:
@@ -1264,11 +1647,23 @@ class Plugin(indigo.PluginBase):
 				refreshFromIeeAfterDays = 10,
 				myLogger                = self.indiLOG.log,
 			)
-			self.waitForMAC2vendor = not self.M2V.makeFinalTable(quiet=True)
-			if not self.waitForMAC2vendor:
+			# MAP2Vendor.__init__ calls makeFinalTable() when the JSON is ready.
+			# Check whether the dict is already populated to avoid a second read.
+			already_ready = (
+				hasattr(self.M2V, "mac2VendorDict") and
+				isinstance(self.M2V.mac2VendorDict, dict) and
+				len(self.M2V.mac2VendorDict.get("6", {})) > 1000
+			)
+			if already_ready:
+				self.waitForMAC2vendor = False
 				self.indiLOG.log(20, "MAC2Vendor lookup table ready.")
 			else:
-				self.indiLOG.log(20, "MAC2Vendor: downloading OUI tables in background…")
+				# Table not yet built — background download must be in progress
+				self.waitForMAC2vendor = not self.M2V.makeFinalTable(quiet=True)
+				if not self.waitForMAC2vendor:
+					self.indiLOG.log(20, "MAC2Vendor lookup table ready.")
+				else:
+					self.indiLOG.log(20, "MAC2Vendor: downloading OUI tables in background…")
 		except Exception as e:
 			self.indiLOG.log(30, f"MAC2Vendor init failed: {e} — vendor names will show as 'Unknown'")
 
@@ -1306,6 +1701,13 @@ class Plugin(indigo.PluginBase):
 			try:
 				with open(self.stateFile, "r") as f:
 					self._known = json.load(f)
+				# Backfill keys added in later versions so every entry is uniform.
+				for entry in self._known.values():
+					entry.setdefault("history",    [])   # on/off history — empty list if absent
+					entry.setdefault("local_name", "")   # mDNS/Bonjour name
+					entry.setdefault("name",       "")   # Indigo device name
+					entry.setdefault("curlPort",   None) # last curl port that responded
+				entry.setdefault("curlUseless", 0)  # consecutive all-port curl failures
 				self.indiLOG.log(20, f"Loaded {len(self._known)} known devices from state file.")
 			except Exception as e:
 				self.indiLOG.log(30, f"Could not load state file: {e}")
@@ -1322,6 +1724,58 @@ class Plugin(indigo.PluginBase):
 	# ------------------------------------------------------------------
 	# Menu actions (visible in Indigo's Plugins menu)
 	# ------------------------------------------------------------------
+
+	def importNamesFromFingscan(self, valuesDict=None,  *args):
+		"""read device names from fingscan, store them in fingscan info and use when a matching mac number is found. write to dev state: fingscanDeviceName"""
+		self.indiLOG.log(20, f"Importing fingscan dev names…")
+		count = 0
+		_fingScanDevices = {}
+		for dev in indigo.devices.iter("com.karlwachs.fingscan"):
+			if dev.deviceTypeId != "IP-Device": continue
+			if "MACNumber" not in dev.states: continue
+			_fingScanDevices[dev.states["MACNumber"]] = json.dumps({"name":dev.name, "pingMode": dev.pluginProps.get("setUsePing","none")})
+		
+		for dev in indigo.devices.iter("com.karlwachs.networkscanner"):
+			for mac in _fingScanDevices:
+				if dev.states["macAddress"].lower() == mac.lower():
+					count += 1 
+					if dev.states["fingscanDeviceInfo"] != _fingScanDevices[mac]:
+						dev.updateStateOnServer("fingscanDeviceInfo", value=_fingScanDevices[mac])
+						break
+		self.indiLOG.log(20, f"Importing fingscan dev names, found {count} matches")
+
+		return valuesDict
+
+
+	def overwriteDevNamesWithFingNames(self, valuesDict=None, *args):
+		"""use the above imported names to overwrite the device names like: NET_oldFingname"""
+		self.indiLOG.log(20, f"overwriting  dev names with fingscan dev names… to NET_old fingscan name ")
+		count = 0
+	
+		_fingToMyPingMode = {"doNotUsePing":"none", "usePingifUP":"offline", "usePingifDown":"online", "usePingifUPdown":"both", "useOnlyPing":"pingOnly"}
+		for dev in indigo.devices.iter("com.karlwachs.networkscanner"):
+			if dev.states["fingscanDeviceName"] != "":
+				fingInfo = json.loads(dev.states["fingscanDeviceInfo"])
+				pingMode = fingInfo["pingMode"]
+				myPingMode = _fingToMyPingMode.get(pingMode,"none")
+
+				oldName = dev.states['fingscanDeviceName']
+				newName =  f"{oldName}-{self._getPrefixName()}".strip("_").strip("-")
+				if dev.name != newName:
+					count += 1 
+					dev.name = newName
+					dev.replaceOnServer()
+
+				if myPingMode != "none":
+					props = dev.pluginProps
+					props["pingMode"] = myPingMode
+					dev.replacePluginPropsOnServer(props)
+
+
+		self.indiLOG.log(20, f"overwriting dev names, found {count} overwrites")
+
+		return valuesDict
+
 
 	def listKnownDevices(self):
 		with self._known_lock:
@@ -1349,9 +1803,11 @@ class Plugin(indigo.PluginBase):
 			last_seen = entry.get("last_seen", 0)
 			ts        = datetime.datetime.fromtimestamp(last_seen).strftime("%Y-%m-%d %H:%M:%S") if last_seen else "never"
 
-			self.indiLOG.log(20, f"  MAC     : {mac}")
-			self.indiLOG.log(20, f"  IP      : {ip or '—'}")
-			self.indiLOG.log(20, f"  Vendor  : {vendor}")
+			local_name = entry.get("local_name", "")
+			self.indiLOG.log(20, f"  MAC       : {mac}")
+			self.indiLOG.log(20, f"  IP        : {ip or '—'}")
+			self.indiLOG.log(20, f"  LocalName : {local_name or '—'}")
+			self.indiLOG.log(20, f"  Vendor    : {vendor}")
 			streak = entry.get("ping_fail_streak", 0)
 			self.indiLOG.log(20, f"  Online  : {'Yes' if online else 'No'}   Last seen: {ts}   Ping-fail streak: {streak}")
 
@@ -1365,6 +1821,8 @@ class Plugin(indigo.PluginBase):
 				self.indiLOG.log(20, f"    created         : {states.get('created', '')}")
 				open_ports = states.get("openPorts", "")
 				self.indiLOG.log(20, f"    openPorts       : {open_ports or '—'}")
+				comment = states.get("comment", "")
+				self.indiLOG.log(20, f"    comment         : {comment or '—'}")
 
 				# --- per-device plugin properties ---
 				props          = dev.pluginProps
@@ -1385,7 +1843,27 @@ class Plugin(indigo.PluginBase):
 			else:
 				self.indiLOG.log(20, f"  Indigo  : no Indigo device")
 
+			# --- on/off history (stored in known_devices.json, last 10 events) ---
+			history = entry.get("history", [])
+			if history:
+				self.indiLOG.log(20, f"  History : (newest first)")
+				for h in reversed(history):
+					self.indiLOG.log(20, f"    {h.get('ts','?')}  →  {h.get('state','?')}")
+			else:
+				# No history recorded yet — fall back to the onOffState uiValue from
+				# the Indigo device state, which is set to "on/off  YYYY-MM-DD HH:MM:SS"
+				fallback = ""
+				if dev:
+					state_str   = "on" if dev.states.get("onOffState", False) else "off"
+					last_change = dev.states.get("lastOnOffChange", "")
+					fallback    = f"{state_str}  {last_change}" if last_change else state_str
+				if fallback:
+					self.indiLOG.log(20, f"  History : (from device state)  {fallback}")
+				else:
+					self.indiLOG.log(20, f"  History : none recorded yet")
+
 			self.indiLOG.log(20, sep)
+
 
 	def forceRescan(self):
 		"""Trigger an immediate ARP sweep + ping check."""
@@ -1405,9 +1883,73 @@ class Plugin(indigo.PluginBase):
 		self._save_state()
 		self.indiLOG.log(20, "Forced rescan complete.")
 
+
+	def printInstableDevices(self, valuesDict=None, *args):
+		"""Menu: print devices that have frequent on off to enable better settings fr ping and threshold"""
+		cutoff = float(valuesDict.get("cutoff", "60"))
+
+
+		with self._known_lock:
+			snapshot = dict(self._known)
+			
+		if not snapshot:
+			self.indiLOG.log(20, "No devices discovered yet.")
+			return valuesDict
+			
+		for mac in snapshot:
+			history = snapshot[mac]["history"]
+			#self.indiLOG.log(20,f" mac:{mac},  history:{history}")
+			if len(history) < 4: continue
+			
+			"""history:[
+				  {"ts": "2026-04-15 17:58:48", "state": "on"       },
+				  {"ts": "2026-04-15 18:00:23", "state": "off"       },
+				  {"ts": "2026-04-15 18:05:09", "state": "on"       },
+				  {"ts": "2026-04-15 18:06:44", "state": "off"       }, ...
+				  ]
+			"""		
+			# first do on -> off
+			firstOn = False
+			dt = {"on":list(), "off":list()}
+			maxSec = {"on":0., "off":0.}
+			counter = {"on":0, "off":0}
+			opposit = {"on":"off","off":"on"}
+			for event in history:
+				if dt["on"] == list() and event["state"] != "on": continue
+				if event["state"] == "on": dt["on"].append([event["ts"],"",0])
+				else: dt["on"][-1][1] = event["ts"]
+				
+			for event in history:
+				if dt["off"] == list() and event["state"] != "off": continue
+				if event["state"] == "off": dt["off"].append([event["ts"],"",0])
+				else: dt["off"][-1][1] = event["ts"]
+			#self.indiLOG.log(20,f" mac:{mac},  dt:{dt}")
+				
+			for onoff in dt:
+				for event in dt[onoff]:
+					if event[1] == "": continue
+					deltaSecs  = _date_diff_in_Seconds(event[0], event[1])
+					#self.indiLOG.log(20,f" mac:{mac}, onoff:{onoff};  deltaSecs:{deltaSecs}")
+					if deltaSecs > cutoff: continue
+					maxSec[onoff] = max(maxSec[onoff], deltaSecs)
+					counter[onoff] += 1
+				#self.indiLOG.log(20,f" mac:{mac},  onOff:{onoff}; av:{average[onoff]}, count:{counter[onoff]}")
+				if counter[onoff] < 3: continue
+				try: 
+					dev = indigo.devices[snapshot[mac]["indigo_device_id"]]
+					pingMode = dev.pluginProps["pingMode"]
+				except: pingMode = "       "
+				
+				self.indiLOG.log(20,f"{snapshot[mac]['name'][:30]:30}  transition:{onoff} → {opposit[onoff]};  max time:{maxSec[onoff]:3} secs; number of events:{counter[onoff]:2}; pingMode used:{pingMode}; suggestion: increase  \"Offline Threshold\" to {int(maxSec[onoff]*1.7)//60:3} minutes")
+				
+				
+		return valuesDict   # button callback inside ConfigUI — must return valuesDict to keep dialog open
+				
+				
 	def printSeenStats(self, valuesDict=None, *args):
 		"""Menu: print per-device seen-interval histograms to the log."""
 		sort_by = (valuesDict or {}).get("sortOrder", "ip")
+		now     = time.time()
 
 		with self._known_lock:
 			snapshot = dict(self._known)
@@ -1415,12 +1957,14 @@ class Plugin(indigo.PluginBase):
 			self.indiLOG.log(20, "No devices discovered yet.")
 			return valuesDict
 
-		# Build a MAC → device-name lookup
-		names = {}
+		# Build MAC → device name  and  MAC → device object (for pluginProps)
+		names       = {}
+		devs_by_mac = {}
 		for dev in indigo.devices.iter(PLUGIN_ID):
 			m = dev.states.get("macAddress", "").lower()
 			if m:
-				names[m] = dev.name
+				names[m]       = dev.name
+				devs_by_mac[m] = dev
 
 		def _ip_sort_key(item):
 			return _ip_for_notes(item[1].get("ip", "999.999.999.999"))
@@ -1435,32 +1979,61 @@ class Plugin(indigo.PluginBase):
 		key_fn   = key_fns.get(sort_by, _ip_sort_key)
 		sort_lbl = {"ip": "IP address", "name": "device name", "lastseen": "last seen"}.get(sort_by, "IP address")
 
-		# Header row
+		# Column widths (adjust here to reformat the table)
+		W_NAME = 36   # Indigo device name
+		W_IP   = 16   # zero-padded IP
+		W_PING = 8    # ping mode  (longest value: "offline " = 7 + 1 pad)
+
 		hdr_bins = "  ".join(f"{_SEEN_LABEL[b]:>7}" for b in _SEEN_BINS)
-		sep      = "─" * (76 + 9 * len(_SEEN_BINS))
-		self.indiLOG.log(20, sep)
-		self.indiLOG.log(20, f"Seen-Interval Statistics  (sorted by {sort_lbl})")
-		self.indiLOG.log(20, f"{'Device':<36} {'IP':<16} {'St':<4} {'Last Seen':<20} {'Total':>6}  {hdr_bins}")
-		self.indiLOG.log(20, sep)
+		sep_len  = W_NAME + 1 + W_IP + 1 + 3 + 1 + W_PING + 19 + 1 + 8 + 1 + 7 + 2 + (9 * len(_SEEN_BINS) - 1)
+		sep      = "─" * sep_len
+
+		out =  "\n"+sep 
+		out += "\n"+f"Seen-Interval Statistics  (sorted by {sort_lbl})"
+		out += "\n"
+		out += 		f"{'Device':<{W_NAME}} {'IP':<{W_IP}} {'St':<3} {'Ping':<{W_PING}}"
+		out += 		f"{'Last Seen':<19} {'Ago':>8} {'Total':>7}  {hdr_bins}"
+		out += "\n"+sep
 
 		for mac, entry in sorted(snapshot.items(), key=key_fn):
-			raw       = entry.get("seen_stats", {})
-			stats     = {b: int(raw.get(b, raw.get(str(b), 0))) for b in _SEEN_BINS}
-			total     = sum(stats[b] for b in _SEEN_BINS)
-			name      = names.get(mac, mac)[:35]
-			ip        = _ip_for_notes(entry.get("ip", ""))
-			state     = "on " if entry.get("online", False) else "off"
-			last_seen = entry.get("last_seen_str", "")
-			counts    = "  ".join(f"{stats[b]:>7}" for b in _SEEN_BINS)
-			self.indiLOG.log(20, f"{name:<36} {ip:<16} {state:<4} {last_seen:<20} {total:>6}  {counts}")
+			raw        = entry.get("seen_stats", {})
+			stats      = {b: int(raw.get(b, raw.get(str(b), 0))) for b in _SEEN_BINS}
+			total      = sum(stats[b] for b in _SEEN_BINS)
+			name       = names.get(mac, mac)[:W_NAME - 1]
+			ip         = _ip_for_notes(entry.get("ip", ""))
+			state      = "on " if entry.get("online", False) else "off"
+			last_seen  = entry.get("last_seen_str", "")
+			last_ts    = entry.get("last_seen", 0)
+			ago_str    = f"={int(now - last_ts):>5}s" if last_ts else "       "
+			local_name = entry.get("local_name", "")
+			counts     = "  ".join(f"{stats[b]:>7}" for b in _SEEN_BINS)
 
-		self.indiLOG.log(20, sep)
-		self.indiLOG.log(20,
-			"Bins: " + "  ".join(f"{_SEEN_LABEL[b]}" for b in _SEEN_BINS) +
-			"   (counts = number of sightings within that gap)"
-		)
-		self.indiLOG.log(20, sep)
-		return valuesDict   # button callback inside ConfigUI must return valuesDict to keep dialog open
+			# Ping mode from Indigo device pluginProps (— if no Indigo device yet)
+			ping_mode = "—"
+			dev = devs_by_mac.get(mac)
+			if dev:
+				try:
+					ping_mode = dev.pluginProps.get("pingMode", "—")
+				except Exception:
+					pass
+
+			out += "\n"
+			out += 		f"{name:<{W_NAME}} {ip:<{W_IP}} {state:<3} {ping_mode:<{W_PING}}"
+			out += 		f"{last_seen:<19} {ago_str:>8} {total:>7}  {counts}"
+			
+			# Local name on its own indented line — only when present
+			if local_name:
+				indent = " " * 20
+				out += "\n"+f"{indent}local: {local_name}"
+
+		out += "\n"+sep
+		out += "\n"
+		out +=		"Bins: " + "  ".join(f"{_SEEN_LABEL[b]}" for b in _SEEN_BINS)
+		out +=		"   (counts = number of sightings within that gap)"
+		
+		out += "\n"+sep
+		self.indiLOG.log(20,out)
+		return valuesDict   # button callback inside ConfigUI — must return valuesDict to keep dialog open
 
 	def resetSeenStats(self):
 		"""Menu: clear all seen-interval histograms for every known device."""
@@ -1517,14 +2090,15 @@ class Plugin(indigo.PluginBase):
 		open_p   = self._scan_ports_one(ip)
 		port_str = ", ".join(f"{p}/{_SCAN_PORTS[p][0]}" for p in open_p) if open_p else ""
 		try:
-			dev    = indigo.devices[dev_id]
-			mac    = dev.states.get("macAddress", "")
-			vendor = dev.states.get("vendorName", "")
+			dev        = indigo.devices[dev_id]
+			mac        = dev.states.get("macAddress", "")
+			vendor     = dev.states.get("vendorName", "")
+			local_name = self._known.get(mac.lower(), {}).get("local_name", "") if mac else ""
 			# Update openPorts state
 			dev.updateStateOnServer("openPorts", value=port_str)
-			# Rename if still auto-named and vendor is now known
-			if mac and _is_auto_name(dev.name, mac):
-				correct = _mac_to_device_name(mac, vendor)
+			# Rename if still auto-named and a better label (local name or vendor) is now known
+			if mac and self._is_auto_name(dev.name, mac):
+				correct = _mac_to_device_name(mac, vendor, local_name=local_name, prefixName = self._getPrefixName())
 				if dev.name != correct:
 					dev.name = correct
 					dev.replaceOnServer()
@@ -1610,7 +2184,7 @@ class Plugin(indigo.PluginBase):
 
 		for ip, mac, vendor in targets:
 			ports    = sorted(open_ports.get(ip, []))
-			dev_name = _mac_to_device_name(mac)
+			dev_name = _mac_to_device_name(mac, prefixName = self._getPrefixName())
 			self.indiLOG.log(20, f"  {dev_name}   {_ip_for_notes(ip)}   {vendor}")
 
 			if ports:
@@ -1743,8 +2317,9 @@ class Plugin(indigo.PluginBase):
 				entry["last_seen"] = time.time()
 			self._known[mac] = entry
 
-		self._update_indigo_device_states(dev, mac, ip, vendor, online)
-		self.indiLOG.log(20, f"{dev.name} ({ip}) is {'ONLINE' if online else 'OFFLINE'}")
+		local_name = self._known.get(mac, {}).get("local_name", "")
+		self._update_indigo_device_states(dev, mac, ip, vendor, online, local_name=local_name)
+		self.indiLOG.log(10, f"{dev.name} ({ip}) is {'ONLINE' if online else 'OFFLINE'}")
 
 	# ------------------------------------------------------------------
 	# Set-device-state dialog callbacks

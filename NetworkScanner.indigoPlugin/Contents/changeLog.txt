@@ -2,6 +2,42 @@
 Change Log
 ================================================================================
 
+Version 2025.0.8 (2026-04-16)
+1. Ping replaced with pure Python SOCK_DGRAM/IPPROTO_ICMP socket — no subprocess,
+   no /sbin/ping, no root required. One syscall per probe.
+2. curl TCP probe replaced with pure Python SOCK_STREAM socket connect on ports
+   80/443/22/8080. No subprocess. ConnectionRefusedError counts as alive.
+   Winning port remembered per device in known_devices.json; tried first next time.
+   After 5 consecutive all-port failures the probe is suspended per device
+   (auto-resets when ping next succeeds).
+3. New device option "ICMP Ping Only": skip TCP fallback for specific devices
+   (routers, cameras, printers) so only ICMP ping decides online/offline.
+4. New plugin config option "Log Ping / Probe Results": writes every ICMP ping
+   and TCP probe result to plugin.log (level debug, can be noisy).
+5. Passive sniffing BPF filter tightened: captures only ARP + mDNS (5353) +
+   DHCP (67/68) instead of all traffic — ~95% CPU reduction.
+   Per-MAC throttle raised from 5 s to 30 s.
+
+Version 2025.0.7 (2026-04-16)
+1. Passive sniffing upgraded: tcpdump now captures ALL ethernet traffic, not just ARP.
+   Any packet from a device updates its last-seen timestamp.
+   Catches devices that suppress ARP (iOS privacy mode, VMs, IoT, etc.).
+   Each MAC throttled to one Indigo update per 5 s to avoid API flooding.
+2. Reachability probe upgraded: ping first; if ICMP is blocked, falls back to a
+   curl TCP-connect on ports 80 → 443 → 22 → 8080.
+   Connection refused counts as online (device answered the TCP SYN).
+3. sudo Password field added to plugin config: tcpdump is launched via
+   echo <pw> | sudo -S tcpdump … so it can open the raw BPF socket without
+   granting Indigo full root. Leave blank if tcpdump has the entitlement already.
+4. Device edit and all labels/help text updated to reflect ping→probe change.
+
+Version 2025.0.6 (2026-04-15)
+1. added migration tool from fingscan to network Scanner
+   overwrite new device names with "NET_ old fingscan dev name" if mac number is matching
+2. add offline analysis tool to tune threshold time in device edit
+
+================================================================================
+
 Version 2025.0.5  (2026-04-15)
 -------------------------------
 INSTALLATION
