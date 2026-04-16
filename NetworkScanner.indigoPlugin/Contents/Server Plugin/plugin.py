@@ -601,22 +601,22 @@ class Plugin(indigo.PluginBase):
 
 
 	def _kill_tcpdump(self):
-		"""Kill the tcpdump subprocess.
+		"""Kill the tcpdump subprocess and release its stdout pipe fd.
 
-		Order matters: kill the process FIRST so that any thread blocked inside
-		proc.stdout.readline() gets EOF and releases the TextIOWrapper internal
-		lock.  Calling proc.stdout.close() before proc.kill() deadlocks: the main
-		thread waits forever for the lock held by the sniff thread's blocking read,
-		and proc.kill() is never reached — causing the 20-second SIGKILL timeout.
+		Kill first so that any blocking os.read() in the sniff thread gets EOF,
+		then immediately close stdout to free the file descriptor.  We use raw
+		os.read() (not readline / TextIOWrapper), so there is no lock contention
+		on proc.stdout.close().
 		"""
 		proc = self._sniff_proc
 		if proc:
 			self._sniff_proc = None   # clear first so sniff thread won't re-enter
-			try: proc.kill()          # unblocks any readline() in the sniff thread via EOF
+			try: proc.kill()          # unblocks os.read() in the sniff thread via EOF
 			except Exception: pass
-			# Do NOT call proc.stdout.close() here — the sniff thread may not have
-			# processed the EOF yet, causing a race on the TextIOWrapper internal lock.
-			# The fd is released automatically when the Popen object is GC'd.
+			try: proc.stdout.close()  # release the pipe fd immediately (prevents EMFILE)
+			except Exception: pass
+			try: proc.wait(timeout=2) # reap the zombie so the OS frees its fd table entry
+			except Exception: pass
 
 	def runConcurrentThread(self):
 		"""Indigo's cooperative loop – sleep in 1 s steps so stop is near-instant."""
@@ -1754,12 +1754,12 @@ class Plugin(indigo.PluginBase):
 	
 		_fingToMyPingMode = {"doNotUsePing":"none", "usePingifUP":"offline", "usePingifDown":"online", "usePingifUPdown":"both", "useOnlyPing":"pingOnly"}
 		for dev in indigo.devices.iter("com.karlwachs.networkscanner"):
-			if dev.states["fingscanDeviceName"] != "":
+			if dev.states["fingscanDeviceInfo"] != "":
 				fingInfo = json.loads(dev.states["fingscanDeviceInfo"])
 				pingMode = fingInfo["pingMode"]
 				myPingMode = _fingToMyPingMode.get(pingMode,"none")
 
-				oldName = dev.states['fingscanDeviceName']
+				oldName = fingInfo["name"]
 				newName =  f"{oldName}-{self._getPrefixName()}".strip("_").strip("-")
 				if dev.name != newName:
 					count += 1 
