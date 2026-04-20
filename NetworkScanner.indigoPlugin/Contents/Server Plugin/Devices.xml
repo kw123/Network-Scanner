@@ -3,8 +3,8 @@
 
 	<!--
 		NetworkDevice: one device per discovered MAC address.
-		onState  = True  → device is online (reachable by ARP/ping)
-		onState  = False → device is offline
+		onState  = True  -> device is online (reachable by ARP/ping)
+		onState  = False -> device is offline
 	-->
 	<Device type="custom" id="networkDevice">
 	<UiDisplayStateId>onOffState</UiDisplayStateId>
@@ -22,14 +22,17 @@
 				</List>
 			</Field>
 			<Field id="pingModeLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
-				<Label>Controls how the periodic reachability probe affects this device's online/offline state.
-The probe tries ICMP ping first; if ping is blocked it falls back to a TCP connect on ports 80/443/22/8080 — connection refused still counts as online.
-use "Online + Offline" for verbose tracking of a device
-use "Online only"  to get devices back to "on" fast when they reappear (e.g. phone returning home)
-use "Offline only" to make devices go offline fast when they disappear
-use "Confirm offline" for quiet devices that must not go offline too fast
-use "Ping only" for routers, cameras, printers — ICMP only, no TCP port probing
-use "Not at all" if passive traffic detection alone is sufficient</Label>
+				<Label>Controls how the probe affects online/offline state.
+Probe: ICMP ping first; falls back to TCP (80/443/22/8080)
+  if ICMP is blocked. Connection refused counts as online.
+- Online + Offline  — probe sets both on and off
+- Online only       — fast recovery when device reappears
+    (e.g. phone returning home)
+- Offline only      — fast offline when device disappears
+- Confirm offline   — probe only after ARP timeout; quiet devices
+- Ping only         — ICMP only, no TCP fallback
+    (routers, cameras, printers)
+- Not at all        — passive traffic detection only</Label>
 			</Field>
 
 			<Field id="pingOfflineLogic" type="menu" defaultValue="and">
@@ -70,7 +73,7 @@ use "Not at all" if passive traffic detection alone is sufficient</Label>
 					<Option value="360">6 minutes</Option>
 					<Option value="420">7 minutes</Option>
 					<Option value="480">8 minutes</Option>
-					<Option value="560">9 minutes</Option>
+					<Option value="540">9 minutes</Option>
 					<Option value="600">10 minutes</Option>
 				</List>
 			</Field>
@@ -83,6 +86,20 @@ use "Not at all" if passive traffic detection alone is sufficient</Label>
 			</Field>
 			<Field id="commentLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 				<Label>Free-text note stored as a device state.</Label>
+			</Field>
+
+			<Field id="manualIpOverride" type="textfield" defaultValue="">
+				<Label>Set IP Address</Label>
+			</Field>
+			<Field id="manualIpOverrideLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+				<Label>Manually set the IP address for this device. Leave blank to use the auto-discovered IP. Will be overwritten on the next scan if the device is seen with a different IP.</Label>
+			</Field>
+
+			<Field id="isApOrRouterOverride" type="checkbox" defaultValue="false">
+				<Label>Is AP or Router</Label>
+			</Field>
+			<Field id="isApOrRouterOverrideLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+				<Label>Mark this device as an AP or router. IP changes from the sniff thread will be ignored; only the ARP sweep can update its IP. Set automatically when frequent IP changes are detected.</Label>
 			</Field>
 
 			<Field id="suppressIpChangeLog" type="checkbox" defaultValue="false">
@@ -110,12 +127,12 @@ use "Not at all" if passive traffic detection alone is sufficient</Label>
 				<TriggerLabel>fingscanDeviceInfo</TriggerLabel>
 				<ControlPageLabel>fingscanDeviceInfo</ControlPageLabel>
 			</State>
-			<State id="ipAddress">
+			<State id="ipNumber">
 				<ValueType>String</ValueType>
 				<TriggerLabel>IP Address Changed</TriggerLabel>
 				<ControlPageLabel>IP Address</ControlPageLabel>
 			</State>
-			<State id="macAddress">
+			<State id="MACNumber">
 				<ValueType>String</ValueType>
 				<TriggerLabel>MAC Address Changed</TriggerLabel>
 				<ControlPageLabel>MAC Address</ControlPageLabel>
@@ -125,7 +142,7 @@ use "Not at all" if passive traffic detection alone is sufficient</Label>
 				<TriggerLabel>Last On/Off Change</TriggerLabel>
 				<ControlPageLabel>Last On/Off Change</ControlPageLabel>
 			</State>
-			<State id="vendorName">
+			<State id="hardwareVendor">
 				<ValueType>String</ValueType>
 				<TriggerLabel>Vendor Changed</TriggerLabel>
 				<ControlPageLabel>Vendor</ControlPageLabel>
@@ -149,6 +166,343 @@ use "Not at all" if passive traffic detection alone is sufficient</Label>
 				<ValueType>String</ValueType>
 				<TriggerLabel>Local Name Changed</TriggerLabel>
 				<ControlPageLabel>Local Name</ControlPageLabel>
+			</State>
+			<State id="isApOrRouter">
+				<ValueType boolType="truefalse">Boolean</ValueType>
+				<TriggerLabel>AP or Router Flag Changed</TriggerLabel>
+				<ControlPageLabel>Is AP or Router</ControlPageLabel>
+			</State>
+			<State id="pingMode">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Ping Mode Changed</TriggerLabel>
+				<ControlPageLabel>Ping Mode</ControlPageLabel>
+			</State>
+			<State id="lastOnMessage">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Last On Message</TriggerLabel>
+				<ControlPageLabel>Last On Message</ControlPageLabel>
+			</State>
+			<State id="setOnBy">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Set On By Changed</TriggerLabel>
+				<ControlPageLabel>Set On By</ControlPageLabel>
+			</State>
+			<State id="setOffBy">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Set Off By Changed</TriggerLabel>
+				<ControlPageLabel>Set Off By</ControlPageLabel>
+			</State>
+		</States>
+	</Device>
+
+
+	<!--
+		externalDevice: manually configured host (IP or DNS name) pinged on every scan cycle.
+		Not auto-created — user adds these manually via New Device > External Device.
+	-->
+	<Device type="custom" id="externalDevice">
+		<UiDisplayStateId>onOffState</UiDisplayStateId>
+		<Name>External Device</Name>
+		<ConfigUI>
+			<Field id="host" type="textfield" defaultValue="">
+				<Label>Host / IP Address</Label>
+			</Field>
+			<Field id="hostLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+				<Label>IP address or hostname to ping (e.g. 192.168.1.1 or www.google.com).
+Checked by ICMP ping only — no MAC tracking, no ARP sweep.</Label>
+			</Field>
+
+			<Field id="pingInterval" type="menu" defaultValue="120">
+				<Label>Ping Interval (seconds)</Label>
+				<List>
+					<Option value="10">10</Option>
+					<Option value="20">20</Option>
+					<Option value="30">30</Option>
+					<Option value="60">1 minute</Option>
+					<Option value="90">90</Option>
+					<Option value="120">2 minutes</Option>
+					<Option value="180">3 minutes</Option>
+					<Option value="240">4 minutes</Option>
+					<Option value="300">5 minutes</Option>
+					<Option value="360">6 minutes</Option>
+					<Option value="420">7 minutes</Option>
+					<Option value="480">8 minutes</Option>
+					<Option value="540">9 minutes</Option>
+					<Option value="600">10 minutes</Option>
+				</List>
+			</Field>
+			<Field id="pingIntervalLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+				<Label>How often to ping this host. Independent of the global scan interval.</Label>
+			</Field>
+
+			<Field id="pingMissedCount" type="menu" defaultValue="3">
+				<Label>Missed Pings Before Offline</Label>
+				<List>
+					<Option value="1">1  (first failure counts)</Option>
+					<Option value="2">2</Option>
+					<Option value="3">3</Option>
+					<Option value="4">4</Option>
+					<Option value="5">5</Option>
+				</List>
+			</Field>
+			<Field id="pingMissedCountLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+				<Label>Consecutive failed pings needed to flip the device offline. Higher values reduce false alarms from transient packet loss.</Label>
+			</Field>
+
+			<Field id="comment" type="textfield" defaultValue="">
+				<Label>Comment</Label>
+			</Field>
+			<Field id="commentLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+				<Label>Free-text note stored as a device state.</Label>
+			</Field>
+		</ConfigUI>
+		<States>
+			<State id="onOffState">
+				<ValueType boolType="onoff">Boolean</ValueType>
+				<TriggerLabel>Device Online Status Changed</TriggerLabel>
+				<ControlPageLabel>Online</ControlPageLabel>
+			</State>
+			<State id="host">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Host Changed</TriggerLabel>
+				<ControlPageLabel>Host</ControlPageLabel>
+			</State>
+			<State id="ipNumber">
+				<ValueType>String</ValueType>
+				<TriggerLabel>IP Address Changed</TriggerLabel>
+				<ControlPageLabel>IP Address</ControlPageLabel>
+			</State>
+			<State id="lastOnOffChange">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Last On/Off Change</TriggerLabel>
+				<ControlPageLabel>Last On/Off Change</ControlPageLabel>
+			</State>
+			<State id="pingMs">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Ping Response Time Changed</TriggerLabel>
+				<ControlPageLabel>Ping (ms)</ControlPageLabel>
+			</State>
+			<State id="comment">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Comment Changed</TriggerLabel>
+				<ControlPageLabel>Comment</ControlPageLabel>
+			</State>
+		</States>
+	</Device>
+
+	<!-- ═══════════════════════════════════════════════════════════════
+	     EXTERNAL DEVICE Events  (ping-only hosts: google, yahoo …)
+	     3 device slots each.
+	     ═══════════════════════════════════════════════════════════════ -->
+
+	<!--
+		externalDevicesOffline:
+		Fires when one selected External Device just went offline AND
+		all other non-empty selections are also offline (all-down event).
+	-->
+	<Device type="custom" id="externalDevicesOffline">
+		<UiDisplayStateId>onOffState</UiDisplayStateId>
+		<Name>External Devices — online / offline</Name>
+		<ConfigUI>
+			<Field id="triggerLabel" type="label">
+				<Label>OFF when ALL selected External Devices are offline at the same time. 
+ON when at least one is home 
+You can also trigger on "ParticipantsOnline" to check if all are online
+Leave unused slots as "— not used —".</Label>
+			</Field>
+			
+			<Field id="watchDevice1" type="menu" >
+				<Label>External Device 1</Label>
+				<List class="self" filter="" method="getExternalDeviceList" />
+			</Field>
+			
+			<Field id="watchDevice2" type="menu" >
+				<Label>External Device 2</Label>
+				<List class="self" filter="" method="getExternalDeviceList" />
+			</Field>
+			<Field id="watchDevice3" type="menu" >
+				<Label>External Device 3</Label>
+				<List class="self" filter="" method="getExternalDeviceList" />
+			</Field>
+			<Field id="watchDevicesLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+				<Label>Fires when one selected device goes offline and all other selected devices are also offline.</Label>
+			</Field>
+			<Field id="commentLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+				<Label>Free-text note stored as a device state.</Label>
+			</Field>
+		</ConfigUI>
+		<States>
+			<State id="onOffState">
+				<ValueType boolType="onoff">Boolean</ValueType>
+				<TriggerLabel>Offline</TriggerLabel>
+				<ControlPageLabel>Offline</ControlPageLabel>
+			</State>
+			<State id="comment">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Comment Changed</TriggerLabel>
+				<ControlPageLabel>Comment</ControlPageLabel>
+			</State>
+			<State id="ParticipantsOnline">
+				<ValueType>Integer</ValueType>
+				<TriggerLabel>Participants Online</TriggerLabel>
+				<ControlPageLabel>ParticipantsOnline</ControlPageLabel>
+			</State>
+			<State id="participants">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Participants Changed</TriggerLabel>
+				<ControlPageLabel>Participants</ControlPageLabel>
+			</State>
+			<State id="lastOnOffChange">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Last On/Off Change</TriggerLabel>
+				<ControlPageLabel>Last On/Off Change</ControlPageLabel>
+			</State>
+		</States>
+	</Device>
+
+
+
+	<!--
+		internetAddress: monitors the public (WAN) IP address of this machine.
+		Fetches from well-known IP-echo services on a configurable interval.
+		publicIp state holds the current IP; previousIp holds the one before the last change.
+	-->
+	<Device type="custom" id="internetAddress">
+		<UiDisplayStateId>publicIp</UiDisplayStateId>
+		<Name>Internet Address</Name>
+		<ConfigUI>
+			<Field id="checkInterval" type="menu" defaultValue="300">
+				<Label>Check Interval</Label>
+				<List>
+					<Option value="60">1 minute</Option>
+					<Option value="300">5 minutes</Option>
+					<Option value="600">10 minutes</Option>
+					<Option value="900">15 minutes</Option>
+					<Option value="1800">30 minutes</Option>
+					<Option value="3600">1 hour</Option>
+				</List>
+			</Field>
+			<Field id="checkIntervalLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+				<Label>How often to fetch the public IP address from the internet.</Label>
+			</Field>
+			<Field id="comment" type="textfield" defaultValue="">
+				<Label>Comment</Label>
+			</Field>
+			<Field id="commentLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+				<Label>Free-text note stored as a device state.</Label>
+			</Field>
+		</ConfigUI>
+		<States>
+			<State id="onOffState">
+				<ValueType boolType="onoff">Boolean</ValueType>
+				<TriggerLabel>Reachable Status Changed</TriggerLabel>
+				<ControlPageLabel>Online</ControlPageLabel>
+			</State>
+			<State id="publicIp">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Public IP Changed</TriggerLabel>
+				<ControlPageLabel>Public IP</ControlPageLabel>
+			</State>
+			<State id="previousIp">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Previous IP Changed</TriggerLabel>
+				<ControlPageLabel>Previous IP</ControlPageLabel>
+			</State>
+			<State id="lastChanged">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Last IP Change</TriggerLabel>
+				<ControlPageLabel>Last IP Change</ControlPageLabel>
+			</State>
+			<State id="lastSuccessfulUpdate">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Last Successful Update</TriggerLabel>
+				<ControlPageLabel>Last Successful Update</ControlPageLabel>
+			</State>
+			<State id="lastFailedUpdate">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Last Failed Update</TriggerLabel>
+				<ControlPageLabel>Last Failed Update</ControlPageLabel>
+			</State>
+			<State id="comment">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Comment Changed</TriggerLabel>
+				<ControlPageLabel>Comment</ControlPageLabel>
+			</State>
+		</States>
+	</Device>
+
+
+	<!--
+		networkDevicesAllHome:
+		Fires when one selected Network Device just came back online AND
+		all other non-empty selections are now also online — "all home" event.
+	-->
+	<Device type="custom" id="networkDevicesHomeAway">
+		<UiDisplayStateId>onOffState</UiDisplayStateId>
+		<Name>Network Devices — Home or Away</Name>
+		<ConfigUI>
+			<Field id="triggerLabel" type="label">
+				<Label>ON  when ALL selected Network Devices are online at the same time ("all home")
+OFF when all are gone. 
+You can also trigger on "ParticipantsHome" to check if at least one is home
+Leave unused slots as "— not used —".</Label>
+			</Field>
+			<Field id="watchDevice1" type="menu" >
+				<Label>Network Device 1</Label>
+				<List class="self" filter="" method="getNetworkDeviceListForTrigger" />
+			</Field>
+			<Field id="watchDevice2" type="menu" >
+				<Label>Network Device 2</Label>
+				<List class="self" filter="" method="getNetworkDeviceListForTrigger" />
+			</Field>
+			<Field id="watchDevice3" type="menu" >
+				<Label>Network Device 3</Label>
+				<List class="self" filter="" method="getNetworkDeviceListForTrigger" />
+			</Field>
+			<Field id="watchDevice4" type="menu" >
+				<Label>Network Device 4</Label>
+				<List class="self" filter="" method="getNetworkDeviceListForTrigger" />
+			</Field>
+			<Field id="watchDevice5" type="menu" >
+				<Label>Network Device 5</Label>
+				<List class="self" filter="" method="getNetworkDeviceListForTrigger" />
+			</Field>
+			<Field id="watchDevice6" type="menu" >
+				<Label>Network Device 6</Label>
+				<List class="self" filter="" method="getNetworkDeviceListForTrigger" />
+			</Field>
+			<Field id="watchDevicesLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+				<Label>Fires when one selected device comes online and all other selected devices are also online at that moment.</Label>
+			</Field>
+			<Field id="commentLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+				<Label>Free-text note stored as a device state.</Label>
+			</Field>
+		</ConfigUI>
+		<States>
+			<State id="onOffState">
+				<ValueType boolType="onoff">Boolean</ValueType>
+				<TriggerLabel>All Home</TriggerLabel>
+				<ControlPageLabel>Online</ControlPageLabel>
+			</State>
+			<State id="ParticipantsHome">
+				<ValueType>Integer</ValueType>
+				<TriggerLabel>Participants Home</TriggerLabel>
+				<ControlPageLabel>ParticipantsHome</ControlPageLabel>
+			</State>
+			<State id="participants">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Participants Changed</TriggerLabel>
+				<ControlPageLabel>Participants</ControlPageLabel>
+			</State>
+			<State id="comment">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Comment Changed</TriggerLabel>
+				<ControlPageLabel>Comment</ControlPageLabel>
+			</State>
+			<State id="lastOnOffChange">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Last On/Off Change</TriggerLabel>
+				<ControlPageLabel>Last On/Off Change</ControlPageLabel>
 			</State>
 		</States>
 	</Device>

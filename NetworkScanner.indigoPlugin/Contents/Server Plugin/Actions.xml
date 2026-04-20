@@ -1,16 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Actions>
 
-	<!-- Manual ping check for a single device -->
-	<Action id="pingDevice" deviceFilter="self">
-		<n>Ping Device Now</n>
-		<CallbackMethod>pingDeviceAction</CallbackMethod>
-	</Action>
-
-	<!-- Rename the device to include vendor name -->
-	<Action id="renameWithVendor" deviceFilter="self">
-		<n>Rename Device with Vendor Name</n>
-		<CallbackMethod>renameWithVendorAction</CallbackMethod>
+	<!-- Ping any IP / DNS name and update networkScanner_pingDevice variable -->
+	<Action id="pingCustomHostAction">
+		<Name>Ping Address</Name>
+		<CallbackMethod>pingCustomHostAction</CallbackMethod>
+		<ConfigUI>
+			<Field id="host" type="textfield" defaultValue="">
+				<Label>IP address or hostname</Label>
+			</Field>
+			<Field id="hostLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+				<Label>Enter an IP address or DNS name to ping. Result is logged and written to variable networkScanner_pingDevice (on / off).</Label>
+			</Field>
+		</ConfigUI>
 	</Action>
 
 </Actions>

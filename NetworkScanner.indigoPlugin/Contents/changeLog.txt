@@ -1,6 +1,157 @@
  Network Scanner – Indigo Plugin
 Change Log
 ================================================================================
+Version 2026.5.28 (2026-04-20)
+1. New device type "Internet Address": monitors the public (WAN) IP address of
+   this machine by periodically fetching from well-known IP-echo services.
+   Services tried in order (first to respond wins):
+     1. api.ipify.org
+     2. checkip.amazonaws.com
+     3. icanhazip.com
+   Each service has a 10-second timeout; next service tried on failure.
+2. Internet Address device states:
+     publicIp             — current public IP (device display state)
+     previousIp           — IP before the most recent change
+     lastChanged          — timestamp of last IP change
+     lastSuccessfulUpdate — timestamp of last successful fetch (YYYY-MM-DD HH:MM:SS)
+     lastFailedUpdate     — timestamp of last failed fetch (YYYY-MM-DD HH:MM:SS)
+     onOffState           — True when last fetch succeeded, False when all fail
+3. New plugin menu item "Add Internet Address Device…": creates the device in
+   the configured device folder. Safe to click multiple times — skips if a
+   device of this type already exists.
+4. Service list shown in both the menu dialog and the device edit dialog.
+5. Disabled devices are now fully skipped: no state writes, no probing, no
+   watchdog offline transitions, no aggregate recalculation.
+6. README: added Internet Address device type section, states table, and
+   menu item entry.
+
+================================================================================
+Version 2026.4.28 (2026-04-19)
+1. Fixed false ON transition from ARP sweep: the sweep's TCP fallback no longer
+   counts a TCP RST (ConnectionRefusedError) as "device alive". Some routers send
+   RST on behalf of all subnet IPs, which caused offline devices (e.g. phones) to
+   appear online with setOnBy = "sweep (arp)". Only a full TCP handshake now
+   counts in the sweep. The periodic reachability probe is unchanged (RST still
+   counts there, because if the device's own TCP stack sent RST it is reachable).
+2. setOnBy / setOffBy source labels made more descriptive:
+     "arp"     → "sweep (arp)"
+     "traffic" → "traffic observed (tcpdump)"
+     "ping"    → "ping(ICMP)"
+   "tcp:<port>", "timeout", and "probe" are unchanged.
+3. README: Device States table updated with new states added in recent versions
+   (pingMode, lastOnMessage, setOnBy, setOffBy).
+
+================================================================================
+Version 2026.4.23 (2026-04-19)
+1. State and property renames for clarity ( same as in fingscan)
+     macAddress  → MACNumber
+     ipAddress   → ipNumber
+     vendorName  → hardwareVendor
+   Applied everywhere: Devices.xml states, plugin.py, README.
+2. New device state "pingMode" — synced from the per-device pingMode property
+   at deviceStartComm and whenever the device edit dialog is saved.
+3. New devices no longer briefly appear offline: brand-new MAC entries now get
+   last_seen = now instead of 0; added a safety guard in _check_one for any
+   entry that still carries last_seen = 0.
+4. CPU reduction:
+   • ARP subnet sweep uses ThreadPoolExecutor (max 30 workers) instead of
+     unbounded per-IP threads.
+   • Reachability probe uses ThreadPoolExecutor (max 20 workers) instead of
+     unbounded per-device threads, with an 8-second hard deadline.
+   • MAC→Indigo device ID cache: _register_device stores the device ID in
+     _known; _ensure_indigo_device and _update_indigo_device use it as an O(1)
+     fast path, falling back to a linear scan only on cache miss.
+5. Schema versioning redesigned: pluginVersion (passed to __init__) is compared
+   once against pluginPrefs["schemaVersion"] at startup; self._schema_changed
+   is shared by all deviceStartComm calls — no per-device prop read/write.
+6. Trigger management removed: createTriggersBtn and all trigger lifecycle
+   methods removed from PluginConfig and plugin.py.
+7. New "Ping Address" action and "Ping a Device (IP or DNS)…" menu item:
+   ping any IP address or DNS hostname on demand. Result is logged and written
+   to the new variable networkScanner_pingDevice as "{ip} {ms}ms on/off"
+   (e.g. "142.250.80.46 22ms on"). ms reflects actual ICMP or TCP round-trip.
+8. networkScanner_pingDevice variable created at startup alongside
+   networkScanner_newdevice.
+9. "Add Internet Ping Devices…" moved from PluginConfig to the plugin menu.
+   Added a free-text custom hostname field (e.g. www.welt.de). Device name
+   strips "www." prefix; the TLD is also stripped from the aggregate Address
+   column (e.g. "google · yahoo · welt"). After creation, each selected host
+   is pinged immediately in a background thread and the result is pushed
+   directly to the Indigo device state — devices are online from the start.
+10. "Ping-NetworkScanner Internet" aggregate device Address column is set once
+    at creation time (watched hostnames without www. and TLD, joined by "·");
+    never overwritten. Notes column shows host names instead of MACs.
+11. Aggregate on/off icon fix: stateListOrDisplayStateIdChanged() is now called
+    unconditionally in deviceStartComm for HOME_AWAY and ONLINE devices so
+    newly created aggregate devices register their state list immediately.
+
+
+================================================================================
+Version 2026.3.21 (2026-04-18)
+1. Manual "Is AP or Router" toggle added to Network Device edit dialog.
+   Pre-populated from the live isApOrRouter state; changes are written back
+   to the Indigo state and known_devices.json immediately on Save.
+   Clearing the flag re-enables auto-detection.
+2. AP/router auto-detection moved before the Indigo IPC throttle so rapid
+   IP changes are always counted, even when the throttle would otherwise skip
+   the _ensure_indigo_device call.  When promotion fires, the throttle is
+   bypassed once so isApOrRouter=True is pushed to the Indigo device immediately.
+3. ip_history source tagging: each IP-change record now carries a "source"
+   field — "scan" for ARP-sweep / sniff changes, "manual" for device-edit
+   overrides.  Shown as [scan] / [manual] in List All Devices and
+   Print IP-Changed Devices menu output.
+4. ip_history capped at 20 entries at both write time and at startup load,
+   so old JSON files with more entries are trimmed on first run.
+
+
+================================================================================
+Version 2025.2.18 (2026-04-18)
+1. New device type "Network Devices — Home or Away": watches up to 6 Network
+   Devices; ON when ≥1 is home, OFF when all away. States: onOffState,
+   ParticipantsHome (count), participants (comma-separated device IDs),
+   lastOnOffChange.
+2. New device type "External Devices — Online / Offline": watches up to 3
+   External Devices; ON when ≥1 is reachable, OFF when all down. States:
+   onOffState, ParticipantsOnline (count), participants, lastOnOffChange.
+3. Both aggregate devices write Notes field once on first save as
+   "id,id,id - mac,mac,mac"; never overwritten so user can edit freely.
+4. New plugin event "Network Devices — New Device": fires whenever a new
+   MAC address is auto-created as an Indigo device.
+5. New Indigo variable "networkScanner_newdevice": created at startup,
+   updated to "{deviceId}  {timestamp}" on every new device creation.
+6. New plugin config field "Variable Folder Name": plugin-created variables
+   are placed in this Indigo variable folder (auto-created if needed).
+7. NameNotUniqueError hardened: new _unique_device_name() helper used at
+   all rename/create sites; description + rename batched into one
+   replaceOnServer() call in _update_indigo_device_states.
+8. _is_auto_name() now returns False when mac is blank, preventing spurious
+   renames of aggregate/external devices that have no MAC address state.
+
+================================================================================
+Version 2025.2.17 (2026-04-18)
+1. added report fingscan <-> network scanner 
+2. added more info when dev is created
+3. added device type external device. used to  ping , can check if internet is ok
+   also added default (google ..) in config auto auto auto create them
+ 
+
+================================================================================
+Version 2025.0.15 (2026-04-17)
+1. New device state `isApOrRouter` (Boolean) — set to True when multiple IPs share
+   the same MAC in the ARP table (proxy-ARP WiFi AP or router detected).
+   The plugin picks the bare `?` entry as the AP's own IP and clears any stale
+   client hostname from localName.
+2. ARP sweep deduplication: multiple IPs for one MAC are collapsed to the best
+   single entry (no-hostname > hostname, non-link-local > link-local).
+3. IP-change throttle for proxy-ARP devices to prevent log spam and Indigo IPC flood.
+
+================================================================================
+Version 2025.0.12 (2026-04-17)
+1. updated menu item fingscan import
+2. increased timeout for arp from 10 to 15 secs and if fail redo with 30 secs
+3. added throttle updates if frequent ip number update
+
+================================================================================
 Version 2025.0.11 (2026-04-16)
 1. fixed key fingscanDeviceName not found in dict
     fixed wrong old fingscan dev name 

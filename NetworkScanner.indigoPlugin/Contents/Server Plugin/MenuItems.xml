@@ -6,6 +6,97 @@
 		<CallbackMethod>forceRescan</CallbackMethod>
 	</MenuItem>
 
+	<MenuItem id="pingCustomHost">
+		<Name>Ping a Device (IP or DNS)…</Name>
+		<ConfigUI>
+			<Field id="host" type="textfield" defaultValue="">
+				<Label>IP address or hostname</Label>
+			</Field>
+			<Field id="hostLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+				<Label>Enter an IP address (e.g. 192.168.1.1) or a DNS name (e.g. google.com).
+Result is written to the log and to variable networkScanner_pingDevice (on / off).</Label>
+			</Field>
+			<Field id="execPing" type="button">
+				<Label> </Label>
+				<Title>PING</Title>
+				<CallbackMethod>pingCustomHostButton</CallbackMethod>
+			</Field>
+			<Field id="result" type="textfield">
+				<Label>result</Label>
+			</Field>
+		</ConfigUI>
+	</MenuItem>
+
+	<MenuItem id="addDefaultExtDevices">
+		<Name>Add Internet Ping Devices…</Name>
+		<ConfigUI>
+			<Field id="introLabel" type="label">
+				<Label>Select 3 providers.
+ "Ping-"name devices will be created  they show up / down and ms response time
+ A device "Ping-NetworkScanner Internet" will be created that reflects internet down / up = all three down / one up
+ This could also be created manually</Label>
+			</Field>
+			<Field id="extDev_google" type="checkbox" defaultValue="false">
+				<Label>google-ping  (www.google.com)</Label>
+			</Field>
+			<Field id="extDev_yahoo" type="checkbox" defaultValue="false">
+				<Label>yahoo-ping  (www.yahoo.com)</Label>
+			</Field>
+			<Field id="extDev_microsoft" type="checkbox" defaultValue="false">
+				<Label>microsoft-ping  (www.microsoft.com)</Label>
+			</Field>
+			<Field id="extDev_cnn" type="checkbox" defaultValue="false">
+				<Label>cnn-ping  (www.cnn.com)</Label>
+			</Field>
+			<Field id="extDev_att" type="checkbox" defaultValue="false">
+				<Label>att-ping  (www.att.com)</Label>
+			</Field>
+			<Field id="extDev_siemens" type="checkbox" defaultValue="false">
+				<Label>siemens-ping  (www.siemens.com)</Label>
+			</Field>
+			<Field id="customHostSeparator" type="label" fontSize="small" fontColor="darkgrey">
+				<Label>── Custom host ──────────────────────────────</Label>
+			</Field>
+			<Field id="customHost" type="textfield" defaultValue="">
+				<Label>Hostname or IP (e.g. www.welt.de)</Label>
+			</Field>
+			<Field id="customHostLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+				<Label>Leave blank to skip. Device name will be "Ping-{hostname}".</Label>
+			</Field>
+			<Field id="addDefaultExtDevices" type="button">
+				<Label> </Label>
+				<Title>Add Selected Ping Devices</Title>
+				<CallbackMethod>addDefaultExternalDevices</CallbackMethod>
+			</Field>
+			<Field id="extDevMsg" type="label" alignWithControl="true" fontSize="small" fontColor="green">
+				<Label>Check providers above then click the button. Placed in the Device Folder. Safe to click multiple times — skips any host that already exists.</Label>
+			</Field>
+			<Field id="extDevManualNote" type="label" fontSize="small" fontColor="darkgrey">
+				<Label>External devices can also be created manually via New Device → External Device.</Label>
+			</Field>
+		</ConfigUI>
+	</MenuItem>
+
+	<MenuItem id="addInternetAddressDevice">
+		<Name>Add Internet Address Device…</Name>
+		<ConfigUI>
+			<Field id="infoLabel" type="label">
+				<Label>Creates one "Internet Address" device that periodically fetches
+the public (WAN) IP address of this machine from the internet.
+The current IP is shown as the device display state "publicIp".
+Safe to click multiple times — skips creation if the device already exists.</Label>
+			</Field>
+			<Field id="addBtn" type="button">
+				<Label> </Label>
+				<Title>Add Device</Title>
+				<CallbackMethod>addInternetAddressDevice</CallbackMethod>
+			</Field>
+			<Field id="resultMsg" type="label" alignWithControl="true" fontSize="small" fontColor="green">
+				<Label> </Label>
+			</Field>
+		</ConfigUI>
+	</MenuItem>
+
 	<MenuItem id="scanOpenPorts">
 		<Name>Scan Open Ports on All Online Devices…</Name>
 		<CallbackMethod>scanOpenPorts</CallbackMethod>
@@ -78,6 +169,11 @@
 		<CallbackMethod>listKnownDevices</CallbackMethod>
 	</MenuItem>
 
+	<MenuItem id="printIpChangedDevices">
+		<Name>Print Devices with IP Address Changes</Name>
+		<CallbackMethod>printIpChangedDevices</CallbackMethod>
+	</MenuItem>
+
 	<MenuItem id="printInstableDevices">
 		<Name>Print devices that have frequent on and off…</Name>
 		<ConfigUI>
@@ -136,24 +232,31 @@
 		<Name>---- Fingscan Migration Tools ---</Name>
 	</MenuItem>
 
-	<MenuItem id="importNamesFromFingscan">
+	<MenuItem id="importFromFingscan">
 		<Name>Import info from fingscan</Name>
 		<ConfigUI>
-			<Field id="MSG" type="label" defaultValue="">
-				<Label>All devices found with matching MAC number will get a state: fingscanDeviceName = old fingscan name, ping settings </Label>
+			<Field id="MSG" type="textfield" defaultValue="">
+				<Label>msgfrom plugin: </Label>
+			</Field>
+
+			<Field id="Lab0" type="label" defaultValue="">
+				<Label>(0) compare fingscan and network scanner devices </Label>
+			</Field>
+			<Field id="executeCompare" type="button">
+				<Title>IMPORT</Title>
+				<CallbackMethod>compareFingscanToNetworkScannerDevices</CallbackMethod>
+			</Field>
+
+			<Field id="Lab1" type="label" defaultValue="">
+				<Label>(1) All devices found with matching MAC number will get a state: fingscanDeviceName = old fingscan name, ping settings </Label>
 			</Field>
 			<Field id="executeImport" type="button">
 				<Title>IMPORT</Title>
 				<CallbackMethod>importNamesFromFingscan</CallbackMethod>
 			</Field>
-		</ConfigUI>
-	</MenuItem>
 
-	<MenuItem id="overwriteDevNamesWithFingNames">
-		<Name>Overwrite device names with old fingscan names</Name>
-		<ConfigUI>
-			<Field id="MSG" type="label" defaultValue="">
-				<Label>All devices found with matching MAC number will get a new name: "oldfing scan name" - prefix Name</Label>
+			<Field id="Lab2" type="label" defaultValue="">
+				<Label>(2) All devices found with matching MAC number will get a new name: oldfing_scan_name-prefix </Label>
 			</Field>
 			<Field id="executeOverwrite" type="button">
 				<Title>OVERWRITE</Title>
