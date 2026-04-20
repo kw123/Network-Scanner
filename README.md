@@ -2,6 +2,14 @@
 
 Discovers all devices on the local LAN and creates one Indigo device per unique MAC address found. The device's on/off state reflects whether the physical device is currently reachable on the network.
 
+Beyond basic LAN scanning the plugin provides:
+
+- **Internet ping devices** — monitor external hosts (Google, Yahoo, custom hostname…) by ICMP ping on a fixed interval. One-click creation via *Add Internet Ping Devices…*
+- **Internet Address device** — tracks the public (WAN) IP of this machine; alerts when the IP changes. Created via *Add Internet Address Device…*
+- **Home or Away aggregate** — watches up to 6 Network Devices; ON when at least one is home, OFF when all are away. Use it to trigger automations when someone arrives or leaves.
+- **Online / Offline aggregate** — watches up to 3 External Devices; ON when at least one is reachable, OFF when all fail. Instant internet up/down indicator.
+- **On-demand ping** — ping any IP or DNS hostname from the plugin menu; result written to the `networkScanner_pingDevice` variable.
+
 ---
 
 ## Requirements
@@ -15,6 +23,11 @@ No third-party packages required.
 | `/sbin/ifconfig` | Determines local subnet (IP and netmask) |
 | `Python socket` | ICMP ping (`SOCK_DGRAM / IPPROTO_ICMP`) and TCP-connect probe (`SOCK_STREAM`) — no subprocess, no root required |
 | `MAC2Vendor.py` | Bundled OUI vendor lookup — auto-downloads IEEE tables on first run, caches locally |
+
+> **macOS password required for tcpdump.**  
+> `tcpdump` needs elevated privileges to open the BPF network socket for passive sniffing.  
+> Enter your macOS login password in *Plugins → Network Scanner → Configure… → sudo Password*.  
+> Leave blank only if tcpdump already has the BPF entitlement granted via `sudo chmod` or a system policy.
 
 ---
 
@@ -111,6 +124,27 @@ Aggregate device that watches up to **3 External Devices** and tracks internet c
 - **Address column** — set once at creation: watched hostnames with `www.` and TLD stripped, separated by `·` (e.g. `google · yahoo · welt`). Never overwritten.
 - **Notes column** — written once on first save as `id,id,id - host,host,host`; never overwritten
 
+### Internet Address
+
+Monitors the public (WAN) IP address of this machine. Fetches from well-known IP-echo services on a configurable interval and stores the result in the `publicIp` state (shown as the device display state in the Indigo device list).
+
+- **Display state**: `publicIp` — current public IP address
+- **ON** — last fetch succeeded
+- **OFF** — all services unreachable (internet appears down)
+- **Notes column** — mirrors `publicIp` for easy reading
+
+**Services tried in order** (first to respond wins):
+
+| Priority | Service |
+|----------|---------|
+| 1 | `api.ipify.org` |
+| 2 | `checkip.amazonaws.com` |
+| 3 | `icanhazip.com` |
+
+Each service has a 10-second timeout. The next service is tried only if the previous one fails or times out.
+
+Create via *Plugins → Network Scanner → Add Internet Address Device…* (safe to click multiple times — skips if device already exists).
+
 ---
 
 ## Device Edit — Network Device
@@ -198,6 +232,20 @@ Applies to both **Network Devices — Home or Away** and **External Devices — 
 
 ---
 
+## Device States — Internet Address
+
+| State | Type | Description |
+|-------|------|-------------|
+| `onOffState` | Boolean | `True` = last fetch succeeded, `False` = all services unreachable |
+| `publicIp` | String | Current public (WAN) IP address — also shown as the device display state |
+| `previousIp` | String | IP address before the most recent change |
+| `lastChanged` | String | Timestamp when `publicIp` last changed |
+| `lastSuccessfulUpdate` | String | Timestamp of the most recent successful fetch (`YYYY-MM-DD HH:MM:SS`) |
+| `lastFailedUpdate` | String | Timestamp of the most recent failed fetch (`YYYY-MM-DD HH:MM:SS`) |
+| `comment` | String | Free-text note |
+
+---
+
 ## New Device Notification
 
 Each time a new MAC address is auto-created as an Indigo device, the variable `networkScanner_newdevice` is updated to `{deviceId}  {timestamp}`.
@@ -241,6 +289,7 @@ indigo.server.sendEmailTo("your email address", subject=theSubject, body=theBody
 | Force Immediate Rescan | Triggers an ARP sweep + ping check immediately |
 | **Ping a Device (IP or DNS)…** | Enter any IP address or DNS name, click **PING**. Result is logged and written to `networkScanner_pingDevice` as `{ip} {ms}ms on/off`. |
 | **Add Internet Ping Devices…** | Select from Google, Yahoo, Microsoft, CNN, AT&T, Siemens, or enter a **custom hostname** (e.g. `www.welt.de`). Creates External Device entries for each selected host — device name is `Ping-{host}` with `www.` stripped (e.g. `Ping-welt.de`). Safe to run multiple times — skips any host that already exists. Also auto-creates a **Ping-NetworkScanner Internet** aggregate device (watches up to 3 devices) as an instant internet up/down indicator — Address column shows the watched names without `www.` and TLD (e.g. `google · yahoo · welt`). Pings each selected host immediately after creation and logs the results. |
+| **Add Internet Address Device…** | Creates one **Internet Address** device that periodically fetches the public (WAN) IP of this machine. Services tried in order: `api.ipify.org` → `checkip.amazonaws.com` → `icanhazip.com`. Safe to click multiple times — skips if device already exists. |
 | Scan Open Ports on All Online Devices… | Port-scans all online devices; stores results in `openPorts` state |
 | Set a State of Device… | Manually overwrite any state on any `Net_*` device |
 | Print All Discovered Devices | Prints all known MACs with IP, local name, vendor, on/off and last-seen to plugin.log |
@@ -344,4 +393,4 @@ Visible in *List All Discovered Devices* and *Print IP-Changed Devices* menu ite
 
 ---
 
-*Author: Karl Wachs — Version 2026.4.28*
+*Author: Karl Wachs — Version 2026.5.28 (2026-04-20)*
