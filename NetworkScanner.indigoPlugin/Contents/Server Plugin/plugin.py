@@ -21,6 +21,7 @@ import datetime
 import json
 import os
 import shlex
+import shutil
 import logging
 import urllib.request
 
@@ -61,12 +62,25 @@ _PING_RETRY_INTERVAL = 3   # seconds between retries  (total extra wait = count 
 _PING_AUTO_PROMOTE_SECS = 120   # 2 minutes
 
 # How long to wait before creating a synthetic-MAC device for a ping-only IP
-# that has no ARP entry — gives tcpdump / ARP time to find the real MAC first
-_PING_ONLY_NEW_DEVICE_DELAY = 60   # seconds
+# that has no ARP entry — gives tcpdump / ARP time to find the real MAC first.
+# Must be long enough to span several scan cycles and a full tcpdump/DHCP cycle.
+_PING_ONLY_NEW_DEVICE_DELAY   = 300   # seconds (5 minutes)
+# Minimum number of consecutive sweeps an IP must be seen without ARP before a
+# synthetic MAC is created — prevents ARP timing glitches from creating devices.
+_PING_ONLY_MIN_SWEEPS         = 5
 
 # ARP timeout — adaptive: starts at MIN, doubles on timeout, capped at MAX (seconds)
 _ARP_TIMEOUT_MIN = 15
 _ARP_TIMEOUT_MAX = 40
+
+# Rate-limit for synthetic MAC device creation — at most one new device per interval
+_SYNTHETIC_MAC_CREATE_INTERVAL = 10   # seconds
+
+# ── Debug / emulation ────────────────────────────────────────────────────────
+# Set to True to bypass the /sbin/ping verification and force ping_ran=True /
+# ping_ok=True for ALL ping-only candidates.  Lets you test synthetic device
+# creation without needing a real unreachable host.  MUST be False in production.
+_DEBUG_FORCE_PING_OK = True
 
 # Link-local address prefix bytes (169.254.x.x / RFC 3927 APIPA)
 _LINK_LOCAL_BYTE1 = 0xA9   # 169
@@ -85,7 +99,8 @@ kDefaultPluginPrefs = {
 	"mdnsQueryEnabled":		True,
 	"offlineThreshold":		"180",
 	"startupGracePeriod":	"60",
-	"autoCreateDevices":	True,
+	"autoCreateDevices":		True,
+	"syntheticDevicesEnabled":	False,
 	"deviceFolder":			"Network Devices",
 	"variableFolder":		"Network Devices",
 	"prefixName":			"NET_",
@@ -625,7 +640,6 @@ class Plugin(indigo.PluginBase):
 		self._sniff_thread     = None
 		self._dhcp_thread      = None
 		self._mdns_thread      = None
-		self._netbios_thread   = None
 		self._scan_thread      = None
 		self._sniff_thread2    = None   # second interface — only created when networkInterface2 is set
 		self._dhcp_thread2     = None
@@ -641,7 +655,16 @@ class Plugin(indigo.PluginBase):
 		# IPs that responded to ping but had no ARP entry: ip → first_detected_time.
 		# Device creation is delayed by _PING_ONLY_NEW_DEVICE_DELAY seconds to give
 		# tcpdump / ARP sweep a chance to find the real MAC first.
-		self._ping_only_pending: dict = {}
+		self._ping_only_pending:          dict  = {}
+		self._last_synthetic_created_at:  float = 0.0   # rate-limit: max 1 synthetic MAC per _SYNTHETIC_MAC_CREATE_INTERVAL
+		self._sbin_ping_missing_logged:   bool  = False  # log missing ping only once per session
+
+		# Resolved executable paths — set to canonical defaults here; _check_executables()
+		# overwrites with the shutil.which()-discovered path at startup if it differs.
+		self._exe_ping    = "/sbin/ping"
+		self._exe_arp     = "/usr/sbin/arp"
+		self._exe_tcpdump = "/usr/sbin/tcpdump"
+		self._exe_dns_sd  = "/usr/bin/dns-sd"
 
 		# Set of lowercase MACs to never create Indigo devices for
 		self._ignored_macs: set = self._load_ignored_macs()
@@ -890,9 +913,72 @@ class Plugin(indigo.PluginBase):
 		return entry["deviceTypeId"] if entry else ""
 
 	###----------------------------------------------------------###
+	# Binaries used via subprocess.  Each entry is (bare_name, canonical_path).
+	# _check_executables() calls shutil.which(bare_name) at startup; if it
+	# finds the binary at a *different* path than canonical_path it logs an
+	# INFO note so the hardcoded call-sites can be updated if needed.
+	# (name, canonical_path) — all are required; missing one logs a level-40 warning
+	_REQUIRED_EXECUTABLES = [
+		("ping",    "/sbin/ping"),
+		("arp",     "/usr/sbin/arp"),
+		("tcpdump", "/usr/sbin/tcpdump"),
+		("dns-sd",  "/usr/bin/dns-sd"),
+	]
+
+	# Map bare name → instance-variable attribute name
+	_EXE_ATTR = {
+		"ping":    "_exe_ping",
+		"arp":     "_exe_arp",
+		"tcpdump": "_exe_tcpdump",
+		"dns-sd":  "_exe_dns_sd",
+	}
+
+	# Search path for shutil.which() — Indigo daemon has a minimal PATH that
+	# omits /sbin and /usr/sbin, so we supply an expanded list explicitly.
+	_EXE_SEARCH_PATH = os.pathsep.join([
+		"/sbin", "/usr/sbin", "/bin", "/usr/bin",
+		"/usr/local/bin", "/usr/local/sbin",
+		"/opt/homebrew/bin", "/opt/homebrew/sbin",
+	])
+
+	def _check_executables(self):
+		"""Locate each required binary and store its real path for subprocess calls.
+
+		Strategy: try the canonical path directly first (fast, works in daemon context).
+		If not there, fall back to shutil.which() with an expanded search path covering
+		standard macOS dirs plus Homebrew prefixes.
+		"""
+		for name, canonical in self._REQUIRED_EXECUTABLES:
+			attr = self._EXE_ATTR.get(name)
+
+			# 1. Try canonical path directly
+			if os.path.isfile(canonical) and os.access(canonical, os.X_OK):
+				found = canonical
+			else:
+				# 2. Search expanded PATH (covers Homebrew and non-standard installs)
+				found = shutil.which(name, path=self._EXE_SEARCH_PATH)
+
+			if found is None:
+				self.indiLOG.log(40,
+					f"Executable '{name}' not found — some plugin features will not work  (looked in: {canonical}, then {self._EXE_SEARCH_PATH})"
+				)
+				# keep canonical default in self._exe_* so the call fails with a
+				# clear FileNotFoundError rather than a cryptic AttributeError
+			else:
+				if attr:
+					setattr(self, attr, found)   # use real path in all subprocess calls
+				note = "  (requires sudo for BPF capture — configure password in plugin prefs)" if name == "tcpdump" else ""
+				if found != canonical:
+					self.indiLOG.log(20,
+						f"Executable '{name}' found at {found}  (canonical was {canonical}) — using found path{note}"
+					)
+				else:
+					self.indiLOG.log(10, f"Executable '{name}' OK at {found}{note}")
+
 	def startup(self):
 		grace = self._grace_period_secs()
 		self.indiLOG.log(20, f"Network Scanner starting up…  (offline ignore period: {grace} s)")
+		self._check_executables()
 		self._startup_time = time.time()
 		self._stop_event.clear()
 		# Always clear per-device tracking on startup — it is a temporary diagnostic tool
@@ -941,16 +1027,15 @@ class Plugin(indigo.PluginBase):
 	###----------------------------------------------------------###
 	def _update_passive_info(self, mac: str, **kwargs):
 		"""Update passive discovery fields (dhcp_hostname, mdns_services, mdns_model,
-		os_hint, netbios_name) in _known and push any changed values to Indigo.
+		os_hint) in _known and push any changed values to Indigo.
 
-		Called from DHCP/mDNS/NetBIOS background threads — safe to call with _known_lock NOT held.
+		Called from DHCP/mDNS background threads — safe to call with _known_lock NOT held.
 		"""
 		_KEY_TO_STATE = {
 			"dhcp_hostname":  "dhcpHostname",
 			"mdns_services":  "mdnsServices",
 			"mdns_model":     "mdnsModel",
 			"os_hint":        "osHint",
-			"netbios_name":   "netbiosName",
 			"local_name":     "localName",    # mDNS SRV hostname
 			"device_type":    "deviceType",
 			"apple_model":    "appleModel",   # mDNS TXT am= (e.g. "iPhone15,3")
@@ -962,9 +1047,17 @@ class Plugin(indigo.PluginBase):
 
 		# mDNS service type → human-readable device category.
 		# Checked in order; first match wins.
+		# More-specific identifiers must come before broad ones:
+		#   _apple-mobdev2 / _companion-link → iPhone/iPad/Mac (advertised alongside _airplay)
+		#   _afpovertcp                       → Mac file sharing (Macs also do _airplay on macOS 12+)
+		#   _airplay / _raop                  → only reaches here if none of the above matched
+		#                                       → HomePod, Apple TV, AirPort Express
 		_SVC_TYPE_MAP = [
-			("_airplay._tcp",         "Smart Speaker / AV"),
-			("_raop._tcp",            "Smart Speaker / AV"),
+			("_apple-mobdev2._tcp",   "Apple Mobile"),       # iPhone / iPad — USB/WiFi sync
+			("_companion-link._tcp",  "Apple Mobile"),       # iPhone / iPad — Handoff / Continuity
+			("_afpovertcp._tcp",      "Mac"),                # Mac AFP file sharing
+			("_airplay._tcp",         "Smart Speaker / AV"), # HomePod, Apple TV (after mobile/Mac ruled out)
+			("_raop._tcp",            "Smart Speaker / AV"), # AirPlay audio (older AirPort Express etc.)
 			("_googlecast._tcp",      "Chromecast"),
 			("_spotify-connect._tcp", "Smart Speaker"),
 			("_homekit._tcp",         "HomeKit Accessory"),
@@ -972,16 +1065,13 @@ class Plugin(indigo.PluginBase):
 			("_ipp._tcp",             "Printer"),
 			("_pdl-datastream._tcp",  "Printer"),
 			("_printer._tcp",         "Printer"),
-			("_afpovertcp._tcp",      "Mac"),
-			("_apple-mobdev2._tcp",   "Apple Mobile"),
-			("_companion-link._tcp",  "Apple Mobile"),
-			("_sleep-proxy._udp",     "Apple Device"),
-			("_device-info._tcp",     "Apple Device"),
 			("_ssh._tcp",             "Computer"),
 			("_sftp-ssh._tcp",        "Computer"),
 			("_smb._tcp",             "Computer / NAS"),
 			("_rfb._tcp",             "Computer (VNC)"),
 			("_daap._tcp",            "Music Server"),
+			("_sleep-proxy._udp",     "Apple Device"),
+			("_device-info._tcp",     "Apple Device"),
 			("_http._tcp",            "Web Server"),
 			("_https._tcp",           "Web Server"),
 		]
@@ -1000,15 +1090,50 @@ class Plugin(indigo.PluginBase):
 					entry[key] = val
 					changed_states[_KEY_TO_STATE[key]] = val
 
-			# Derive deviceType from mDNS services whenever services change.
-			# Only update if we don't already have a type (first match wins across calls).
-			if "mdnsServices" in changed_states and not entry.get("device_type"):
-				svc_str = changed_states["mdnsServices"].lower()
-				for svc_key, label in _SVC_TYPE_MAP:
-					if svc_key in svc_str:
-						entry["device_type"] = label
-						changed_states["deviceType"] = label
+			# Derive deviceType from apple_model and/or mDNS services.
+			# Re-evaluate whenever either field changes so corrections propagate.
+			#
+			# Priority:
+			#   1. apple_model (mDNS TXT am=) — definitive hardware identifier
+			#   2. mDNS service map — fallback when model code is absent
+			#
+			# apple_model prefixes → device type (case-insensitive prefix match):
+			_APPLE_MODEL_MAP = [
+				("iphone",         "Apple Mobile"),
+				("ipad",           "Apple Mobile"),
+				("ipod",           "Apple Mobile"),
+				("macbook",        "Mac"),
+				("imac",           "Mac"),
+				("macpro",         "Mac"),
+				("macmini",        "Mac"),
+				("macstudio",      "Mac"),
+				("xserve",         "Mac"),
+				("audioaccessory", "Smart Speaker / AV"),   # HomePod
+				("appletv",        "Smart Speaker / AV"),
+				("airport",        "Smart Speaker / AV"),   # AirPort Express with AirPlay
+			]
+			if "mdnsServices" in changed_states or "appleModel" in changed_states:
+				# Use the most up-to-date values: prefer the just-changed value,
+				# fall back to what is already stored in the entry.
+				apple_model = (changed_states.get("appleModel") or entry.get("apple_model") or "").lower()
+				svc_str     = (changed_states.get("mdnsServices") or entry.get("mdns_services") or "").lower()
+
+				new_type = None
+				# Step 1 — apple_model prefix match (most specific)
+				for prefix, label in _APPLE_MODEL_MAP:
+					if apple_model.startswith(prefix):
+						new_type = label
 						break
+				# Step 2 — service map fallback
+				if new_type is None and svc_str:
+					for svc_key, label in _SVC_TYPE_MAP:
+						if svc_key in svc_str:
+							new_type = label
+							break
+
+				if new_type and entry.get("device_type") != new_type:
+					entry["device_type"] = new_type
+					changed_states["deviceType"] = new_type
 
 		if not changed_states or not dev_id:
 			return
@@ -1055,7 +1180,7 @@ class Plugin(indigo.PluginBase):
 			# Join with short timeout — scan/sniff threads check stop_event every 0.1–0.2 s
 			# so they should exit well within 1 second.  Never block the main thread longer.
 			for t in (self._scan_thread, self._sniff_thread,
-			          self._dhcp_thread, self._mdns_thread, self._netbios_thread,
+			          self._dhcp_thread, self._mdns_thread,
 			          self._sniff_thread2, self._dhcp_thread2, self._sweep_thread2):
 				if t and t.is_alive():
 					t.join(timeout=1.0)
@@ -1206,6 +1331,37 @@ class Plugin(indigo.PluginBase):
 					if entry.get("indigo_device_id") == dev.id:
 						entry.pop("indigo_device_id", None)
 		# Remove from device cache
+		self._cache_drop(dev.id)
+
+	###----------------------------------------------------------###
+	def deviceDeleted(self, dev):
+		"""Called by Indigo when a device is permanently deleted.
+
+		For synthetic-MAC devices (00:00:00:00:00:XX) we remove the entire _known
+		entry so the IP can be rediscovered cleanly on the next sweep.
+		For real devices we only clear the indigo_device_id so the MAC entry
+		(history, IP, vendor) survives for re-association if the device is recreated.
+		"""
+		super().deviceDeleted(dev)
+		if dev.deviceTypeId != DEVICE_TYPE_ID:
+			self._cache_drop(dev.id)
+			return
+		mac = dev.states.get("MACNumber", "").lower()
+		if not mac:
+			self._cache_drop(dev.id)
+			return
+		is_synthetic = mac.startswith("00:00:00:00:00:")
+		with self._known_lock:
+			if is_synthetic:
+				# Remove entirely — synthetic MACs are ephemeral; we want a clean
+				# rediscovery (fresh pending entry, fresh ping checks) rather than
+				# re-registering against a stale entry with a dead device ID.
+				self._known.pop(mac, None)
+				self.indiLOG.log(20, f"Synthetic device deleted: removed {mac} from known-devices cache")
+			else:
+				entry = self._known.get(mac, {})
+				if entry.get("indigo_device_id") == dev.id:
+					entry.pop("indigo_device_id", None)
 		self._cache_drop(dev.id)
 
 	###----------------------------------------------------------###
@@ -1524,12 +1680,6 @@ class Plugin(indigo.PluginBase):
 		self._mdns_thread.start()
 		self.indiLOG.log(20, "mDNS browse loop started.")
 
-		self._netbios_thread = threading.Thread(
-			target=self._netbios_scan_loop, daemon=True, name="NS-NetBIOS"
-		)
-		self._netbios_thread.start()
-		self.indiLOG.log(20, "NetBIOS scan loop started.")
-
 		self._scan_thread = threading.Thread(
 			target=self._scan_loop, args=(iface, sweep_on), daemon=True, name="NS-Scan"
 		)
@@ -1657,9 +1807,9 @@ class Plugin(indigo.PluginBase):
 				# were PIPE and nothing read it, sudo's password-prompt output fills
 				# the 64 KB pipe buffer, blocks the process, and stdout goes silent.
 				if password:
-					shell_cmd = f"echo {shlex.quote(password)} | sudo -S /usr/sbin/tcpdump -i {iface} -n -e -l '{_BPF}'"
+					shell_cmd = f"echo {shlex.quote(password)} | sudo -S {self._exe_tcpdump} -i {iface} -n -e -l '{_BPF}'"
 				else:
-					shell_cmd = f"/usr/sbin/tcpdump -i {iface} -n -e -l '{_BPF}'"
+					shell_cmd = f"{self._exe_tcpdump} -i {iface} -n -e -l '{_BPF}'"
 				log_cmd = shell_cmd.replace(shlex.quote(password), "***") if password else shell_cmd
 				self.indiLOG.log(20, f"tcpdump launch: {log_cmd}")
 				proc = subprocess.Popen(
@@ -1903,9 +2053,9 @@ class Plugin(indigo.PluginBase):
 		proc_attr = "_dhcp_proc2" if secondary else "_dhcp_proc"
 		if password:
 			cmd = (f"echo {shlex.quote(password)} | sudo -S "
-			       f"/usr/sbin/tcpdump -i {iface} -n -e -vv -l '{BPF}'")
+			       f"{self._exe_tcpdump} -i {iface} -n -e -vv -l '{BPF}'")
 		else:
-			cmd = f"/usr/sbin/tcpdump -i {iface} -n -e -vv -l '{BPF}'"
+			cmd = f"{self._exe_tcpdump} -i {iface} -n -e -vv -l '{BPF}'"
 
 		_ts_re = re.compile(r"^\d{2}:\d{2}:\d{2}\.\d")
 
@@ -2051,7 +2201,7 @@ class Plugin(indigo.PluginBase):
 		# ── Step 1: browse for all service types (10 s window) ──────────────
 		try:
 			proc = subprocess.Popen(
-				["dns-sd", "-B", "_services._dns-sd._udp", "local."],
+				[self._exe_dns_sd, "-B", "_services._dns-sd._udp", "local."],
 				stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
 			)
 		except Exception as e:
@@ -2117,7 +2267,7 @@ class Plugin(indigo.PluginBase):
 		results = []
 		try:
 			proc = subprocess.Popen(
-				["dns-sd", "-B", svc_type, "local."],
+				[self._exe_dns_sd, "-B", svc_type, "local."],
 				stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
 			)
 		except Exception:
@@ -2159,7 +2309,7 @@ class Plugin(indigo.PluginBase):
 		"""
 		try:
 			proc = subprocess.Popen(
-				["dns-sd", "-L", instance, svc_type, "local."],
+				[self._exe_dns_sd, "-L", instance, svc_type, "local."],
 				stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
 			)
 		except Exception:
@@ -2194,49 +2344,6 @@ class Plugin(indigo.PluginBase):
 		except Exception:
 			pass
 		return (ip, model, apple_model, os_version)
-
-	# ------------------------------------------------------------------
-	# NetBIOS name lookup via nmblookup (Windows devices)
-	# ------------------------------------------------------------------
-
-	###----------------------------------------------------------###
-	def _netbios_scan_loop(self):
-		"""Periodically run nmblookup for devices that have no netbiosName yet.
-		Runs every 10 minutes; initial delay 90 s.
-		"""
-		self._stop_event.wait(90)
-		while not self._stop_event.is_set():
-			try:
-				with self._known_lock:
-					targets = [(mac, dict(e)) for mac, e in self._known.items()
-					           if not e.get("netbios_name") and e.get("ip")]
-				for mac, entry in targets:
-					if self._stop_event.is_set():
-						break
-					self._netbios_lookup_device(entry["ip"], mac)
-			except Exception as e:
-				self.indiLOG.log(30, f"NetBIOS scan error: {e}")
-			self._stop_event.wait(600)
-
-	###----------------------------------------------------------###
-	def _netbios_lookup_device(self, ip: str, mac: str):
-		"""Run nmblookup -A <ip> and store Windows computer name if found."""
-		try:
-			result = subprocess.run(
-				["nmblookup", "-A", ip],
-				stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-				timeout=5, text=True
-			)
-			# <00> workstation service = the computer name
-			m = re.search(r'^\s+(\S+)\s+<00>\s+-\s+B\s+<ACTIVE>', result.stdout, re.M)
-			if m:
-				name = m.group(1).strip()
-				if name and name.upper() != "__MSBROWSE__":
-					self._update_passive_info(mac, netbios_name=name, os_hint="Windows")
-		except FileNotFoundError:
-			pass   # nmblookup not installed — silent
-		except Exception:
-			pass
 
 	# ------------------------------------------------------------------
 	# Scan loop
@@ -2392,7 +2499,7 @@ class Plugin(indigo.PluginBase):
 				try:
 					result = subprocess.run(
 						[
-							"/usr/sbin/arp",
+							self._exe_arp,
 							"-a",         # show ALL entries in the kernel ARP cache
 							"-i", iface,  # limit output to entries learned on this interface
 						],
@@ -2529,12 +2636,21 @@ class Plugin(indigo.PluginBase):
 					real_mac_ips = {e.get("ip") for m, e in self._known.items()
 					                if e.get("ip") and not m.startswith("00:00:00:00:00:")}
 				stale_cutoff = now - _PING_ONLY_NEW_DEVICE_DELAY * 10
-				self._ping_only_pending = {
-					ip: ts for ip, ts in self._ping_only_pending.items()
-					if ip not in ips_with_mac        # not yet in ARP
-					and ip not in real_mac_ips        # not yet in passive _known
-					and ts > stale_cutoff             # not older than 10× the delay
-				}
+
+				# _ping_only_pending values are (first_seen_ts, sweep_count) tuples.
+				# Accept plain floats left over from older code and convert them.
+				cleaned = {}
+				for ip, val in self._ping_only_pending.items():
+					if ip in ips_with_mac or ip in real_mac_ips:
+						continue   # real MAC appeared — drop it
+					if isinstance(val, tuple):
+						ts, sc = val
+					else:
+						ts, sc = float(val), 0   # legacy scalar — treat sweep_count as 0
+					if ts <= stale_cutoff:
+						continue   # too old — drop
+					cleaned[ip] = (ts, sc)
+				self._ping_only_pending = cleaned
 
 				for ip in list(responded):
 					if ip in ips_with_mac:
@@ -2549,7 +2665,40 @@ class Plugin(indigo.PluginBase):
 								break
 
 					if existing_synth:
-						# Known synthetic device — refresh last_seen
+						# Known synthetic device — verify with a real ping before refreshing.
+						# If the ping fails the IP is a ghost (proxy-ARP false positive): remove
+						# the synthetic entry from _known so it stops being retried every sweep.
+						# If the ping command itself fails (exception), skip silently — do not
+						# refresh, do not delete; try again next sweep.
+						_syn_ping_ok  = False
+						_syn_ping_ran = False
+						try:
+							_syn_verify = subprocess.run(
+								[self._exe_ping, "-c", "1", "-t", "2", "-q", ip],
+								stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+								timeout=5, text=True
+							)
+							_syn_ping_ran = True
+							_syn_ping_ok  = (_syn_verify.returncode == 0)
+						except Exception:
+							pass   # command failed — leave entry alone, retry next sweep
+						if _DEBUG_FORCE_PING_OK:   # emulate: pretend ping succeeded
+							_syn_ping_ran = True
+							_syn_ping_ok  = True
+						if not _syn_ping_ran:
+							if not self._sbin_ping_missing_logged:
+								self._sbin_ping_missing_logged = True
+								self.indiLOG.log(30, f"/sbin/ping could not run  bad install ping is not installed or wrong place? ")
+							continue   # ping command error — skip silently
+						if not _syn_ping_ok:
+							# Ghost IP — remove synthetic entry from _known
+							with self._known_lock:
+								self._known.pop(existing_synth, None)
+							self.indiLOG.log(10,
+								f"Synthetic device {existing_synth} at {ip}: ping failed — "
+								f"removing (proxy-ARP ghost)"
+							)
+							continue
 						self._register_device(existing_synth, ip, source="ping-only (no ARP)")
 						continue
 
@@ -2571,40 +2720,170 @@ class Plugin(indigo.PluginBase):
 						self._ping_only_pending.pop(ip, None)
 						continue
 
-					# First time seeing this IP without ARP — start the grace window silently.
-					# Only log at DEBUG (10) here; INFO is reserved for actual device creation.
-					pending_since = self._ping_only_pending.get(ip, 0)
-					if pending_since == 0:
-						self._ping_only_pending[ip] = now
+					# Also check the device cache: an Indigo device may carry this IP
+					# in its ipNumber state even if _known hasn't linked it yet (e.g.
+					# after a plugin reload where _known was partially repopulated).
+					with self._dev_cache_lock:
+						ip_in_cache = any(
+							s.get("ipNumber") == ip
+							for s in (v.get("states", {}) for v in self._dev_cache.values())
+						)
+					if ip_in_cache:
+						self._ping_only_pending.pop(ip, None)
+						continue
+
+					# Update / start the pending entry for this IP.
+					# Each sweep increments sweep_count so we know how many consecutive
+					# sweeps have seen this IP without any ARP reply.
+					if ip in self._ping_only_pending:
+						first_seen_ts, sweep_count = self._ping_only_pending[ip]
+						sweep_count += 1
+						self._ping_only_pending[ip] = (first_seen_ts, sweep_count)
+					else:
+						# First time seeing this IP without ARP — start the counter.
+						first_seen_ts, sweep_count = now, 1
+						self._ping_only_pending[ip] = (first_seen_ts, sweep_count)
 						self.indiLOG.log(10,
 							f"Ping-only candidate at {ip}: no ARP entry — waiting "
-							f"{_PING_ONLY_NEW_DEVICE_DELAY}s for passive (tcpdump/ARP) discovery"
+							f"{_PING_ONLY_NEW_DEVICE_DELAY}s / {_PING_ONLY_MIN_SWEEPS} sweeps "
+							f"for passive (tcpdump/ARP) discovery"
 						)
 						continue
 
-					if now - pending_since < _PING_ONLY_NEW_DEVICE_DELAY:
-						continue   # still within the grace window
+					# Both conditions must be met before creating a synthetic device:
+					#   1. IP has been pending for at least _PING_ONLY_NEW_DEVICE_DELAY seconds
+					#   2. IP has been seen in at least _PING_ONLY_MIN_SWEEPS consecutive sweeps
+					time_ready   = (now - first_seen_ts) >= _PING_ONLY_NEW_DEVICE_DELAY
+					sweeps_ready = sweep_count >= _PING_ONLY_MIN_SWEEPS
+					if not (time_ready and sweeps_ready):
+						continue   # still within the waiting window
 
-					# Delay expired and still no real MAC — create synthetic device
+					# Both thresholds met.
+					#
+					# Step 1 — opt-in gate (cheapest check first).
+					# If synthetic device creation is disabled there is no point running
+					# any ping or ARP checks — skip immediately.
+					if not self.pluginPrefs.get("syntheticDevicesEnabled", kDefaultPluginPrefs["syntheticDevicesEnabled"]):
+						continue
+
+					# Step 2 — verification ping.
+					# Send 3 ICMP probes exactly as a user would from a terminal.
+					# The ARP sweep uses a fast broadcast-like flood that some routers
+					# (e.g. Draytek proxy-ARP) answer on behalf of the whole subnet, but
+					# a direct single-host ping to a ghost IP fails in a terminal and
+					# fails here too — that is the definitive real/ghost test.
+					#   • ping fails  → ghost IP, discard permanently, never retried
+					#   • ping passes → confirmed real device, proceed to next steps
+					ping_ok  = False
+					ping_ran = False
+					try:
+						verify = subprocess.run(
+							[self._exe_ping, "-c", "3", "-t", "6", "-q", ip],
+							stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+							timeout=10, text=True
+						)
+						ping_ran = True
+						ping_ok  = (verify.returncode == 0)
+					except Exception:
+						pass   # command error — ping_ran stays False
+					if _DEBUG_FORCE_PING_OK:   # emulate: pretend ping succeeded
+						ping_ran = True
+						ping_ok  = True
+
+					if not ping_ran:
+						# /sbin/ping could not run (permission error, missing binary, etc.).
+						# We don't know if the device is real — leave the entry in pending
+						# and retry next sweep.  Do NOT create a device.
+						if not self._sbin_ping_missing_logged:
+							self._sbin_ping_missing_logged = True
+							self.indiLOG.log(40, f"/sbin/ping could not run ..   bad ping install..  is not installed or differnt directory, do a \"which ping\"  to get the proper path and contact author? ")
+						continue
+
+					if not ping_ok:
+						# Ping ran but got no response — confirmed ghost.
+						# Delete from pending permanently so it is never retried.
+						del self._ping_only_pending[ip]
+						self.indiLOG.log(10,
+							f"Ping-only candidate at {ip}: verification ping failed — "
+							f"discarding (ghost / proxy-ARP false positive)"
+						)
+						continue
+
+					# Step 2b — double-check ping after 1 second.
+					# A single successful ping could be a stray reply or a transient
+					# proxy-ARP echo.  Wait 1 s then ping once more; both must succeed.
+					self._stop_event.wait(1)
+					if self._stop_event.is_set():
+						continue
+					ping2_ok  = False
+					ping2_ran = False
+					try:
+						verify2 = subprocess.run(
+							[self._exe_ping, "-c", "1", "-t", "3", "-q", ip],
+							stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+							timeout=6, text=True
+						)
+						ping2_ran = True
+						ping2_ok  = (verify2.returncode == 0)
+					except Exception:
+						pass
+					if _DEBUG_FORCE_PING_OK:
+						ping2_ran = True
+						ping2_ok  = True
+
+					if not ping2_ran:
+						continue   # binary problem — leave entry pending, retry next sweep
+
+					if not ping2_ok:
+						del self._ping_only_pending[ip]
+						self.indiLOG.log(20,
+							f"Ping-only candidate at {ip}: first ping passed but double-check ping (1 s later) failed — "
+							f"discarding as transient/proxy-ARP false positive  "
+							f"(first ping answered, second did not — suspicious)"
+						)
+						continue
+
+					# Step 3 — final targeted ARP check.
+					# After the ping the kernel may have added an ARP entry.  If a real
+					# unicast MAC appears here, register it as a normal device instead of
+					# creating a synthetic one.
+					real_mac_found = None
+					try:
+						arp_result = subprocess.run(
+							[self._exe_arp, "-n", ip],
+							stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+							timeout=3, text=True
+						)
+						m = re.search(r'at\s+([0-9a-f:]{17})', arp_result.stdout, re.IGNORECASE)
+						if m:
+							real_mac_found = m.group(1).lower()
+					except Exception:
+						pass
+
 					del self._ping_only_pending[ip]
+
+					if real_mac_found and real_mac_found != "ff:ff:ff:ff:ff:ff":
+						self.indiLOG.log(10,
+							f"Ping-only candidate at {ip}: ARP found real MAC {real_mac_found} "
+							f"after verification ping — registering normally"
+						)
+						self._register_device(real_mac_found, ip, source="ping-only (no ARP)")
+						continue
+
+					# Step 4 — rate-limit: at most one synthetic MAC per interval.
+					if now - self._last_synthetic_created_at < _SYNTHETIC_MAC_CREATE_INTERVAL:
+						self._ping_only_pending[ip] = (first_seen_ts, sweep_count)   # put back
+						continue
+
 					synth_mac = self._next_synthetic_mac()
 					self.indiLOG.log(20,
 						f"Ping-only device at {ip}: no ARP/tcpdump after "
-						f"{int(now - pending_since)}s — creating with synthetic MAC {synth_mac}"
+						f"{int(now - first_seen_ts)}s / {sweep_count} sweeps — "
+						f"creating with synthetic MAC {synth_mac}"
 					)
 					self._register_device(synth_mac, ip, source="ping-only (no ARP)")
-					# Set pingMode=pingOnly immediately after device creation
-					with self._known_lock:
-						dev_id = self._known.get(synth_mac, {}).get("indigo_device_id")
-					if dev_id:
-						try:
-							dev   = indigo.devices[dev_id]
-							props = dict(dev.pluginProps)
-							if props.get("pingMode") != "pingOnly":
-								props["pingMode"] = "pingOnly"
-								dev.replacePluginPropsOnServer(props)
-						except Exception as e:
-							self.indiLOG.log(30, f"Could not set pingOnly on {synth_mac}: {e}")
+					self._last_synthetic_created_at = now
+					# pingMode=pingOnly is set in _create_indigo_device for synthetic MACs
 					ping_only_n += 1
 
 			if self.decideMyLog("Sweep"):
@@ -2629,7 +2908,7 @@ class Plugin(indigo.PluginBase):
 				try:
 					_flush_cmd = (
 						f"echo {shlex.quote(_arp_flush_password)} | "
-						f"sudo -S /usr/sbin/arp -d -a"
+						f"sudo -S {self._exe_arp} -d -a"
 					)
 					subprocess.run(
 						_flush_cmd, shell=True, timeout=5,
@@ -2746,7 +3025,8 @@ class Plugin(indigo.PluginBase):
 				with self._known_lock:
 					e = self._known.setdefault(mac, {})
 					e.setdefault("curlPort", None)
-					e["curlUseless"] = 0
+					e["curlUseless"]      = 0
+					e["curlPingMismatch"] = 0   # ping works → reset mismatch counter
 				return True
 			if ping_only:
 				return False
@@ -2764,6 +3044,21 @@ class Plugin(indigo.PluginBase):
 				e = self._known.setdefault(mac, {})
 				e["curlPort"]    = port
 				e["curlUseless"] = 0 if port is not None else (entry.get("curlUseless", 0) + 1)
+				if port is not None:
+					# ping failed but TCP succeeded — could be a router answering on behalf
+					# of the device (e.g. Draytek proxy-TCP). Track consecutive mismatches.
+					mismatch = e.get("curlPingMismatch", 0) + 1
+					e["curlPingMismatch"] = mismatch
+					if mismatch >= _CURL_USELESS_LIMIT:
+						# TCP keeps responding when ping fails — suspend TCP for this device
+						e["curlUseless"] = _CURL_USELESS_LIMIT
+						self.indiLOG.log(20,
+							f"probe {dev_name} ({ip})  TCP suspended: ping/TCP mismatch "
+							f"{mismatch}× in a row — router likely answering on device's behalf"
+						)
+						return False
+				else:
+					e["curlPingMismatch"] = 0   # TCP also failed → not a proxy issue
 			if port is not None:
 				probe_source[mac] = f"tcp:{port}"
 			return port is not None
@@ -3557,10 +3852,11 @@ class Plugin(indigo.PluginBase):
 			entry.setdefault("history",      [])    # backfill for entries added before history existed
 			entry.setdefault("ip_history",   [])    # backfill for entries added before ip_history existed
 			entry.setdefault("local_name",   "")    # backfill for entries added before local_name existed
-			entry.setdefault("name",         "")    # backfill for entries added before name existed
-			entry.setdefault("curlPort",     None)  # last curl port that responded
-			entry.setdefault("curlUseless",  0)     # consecutive all-port curl failures
-			entry.setdefault("is_ap_or_router", False) # True when device does proxy-ARP for others
+			entry.setdefault("name",             "")    # backfill for entries added before name existed
+			entry.setdefault("curlPort",         None)  # last curl port that responded
+			entry.setdefault("curlUseless",      0)     # consecutive all-port curl failures
+			entry.setdefault("curlPingMismatch", 0)     # consecutive ping-fail/TCP-success (router proxy detection)
+			entry.setdefault("is_ap_or_router",  False) # True when device does proxy-ARP for others
 			entry["ip"] = ip
 			if clear_local_name:                    # proxy-ARP AP: mark and wipe stale client name
 				entry["is_ap_or_router"] = True
@@ -3603,10 +3899,11 @@ class Plugin(indigo.PluginBase):
 			entry.setdefault("history",         [])    # ensure key present on every entry
 			entry.setdefault("ip_history",      [])    # list of IP changes: [{ts, old_ip, new_ip}]
 			entry.setdefault("ip_change_times", [])    # epoch list for AP/router auto-detection
-			entry.setdefault("local_name",      "")    # ensure key present on every entry
-			entry.setdefault("name",            "")    # ensure key present on every entry
-			entry.setdefault("curlPort",        None)  # last curl port that responded
-			entry.setdefault("curlUseless",     0)     # consecutive all-port curl failures
+			entry.setdefault("local_name",       "")    # ensure key present on every entry
+			entry.setdefault("name",             "")    # ensure key present on every entry
+			entry.setdefault("curlPort",         None)  # last curl port that responded
+			entry.setdefault("curlUseless",      0)     # consecutive all-port curl failures
+			entry.setdefault("curlPingMismatch", 0)     # consecutive ping-fail/TCP-success (router proxy detection)
 			entry.setdefault("last_indigo_push", 0)    # epoch of last _ensure_indigo_device call
 			entry.setdefault("is_ap_or_router",  False) # True when device does proxy-ARP for others
 			# Passive traffic confirmation resets the ping-revival timer — the device is
@@ -3759,6 +4056,12 @@ class Plugin(indigo.PluginBase):
 					self._cache_put(_dev)
 				except Exception:
 					existing_id = None   # device was deleted externally
+					# Also clear the stale ID from _known so the sentinel check below
+					# does not mistake it for an in-progress creation and return early.
+					with self._known_lock:
+						entry = self._known.get(mac, {})
+						if entry.get("indigo_device_id") not in (None, -1):
+							entry.pop("indigo_device_id", None)
 
 		if existing_id is None:
 			# Fallback: scan all plugin devices (covers new MACs and deleted/re-created devices)
@@ -3772,9 +4075,42 @@ class Plugin(indigo.PluginBase):
 					break
 
 		if existing_id is None and self.pluginPrefs.get("autoCreateDevices", kDefaultPluginPrefs["autoCreateDevices"]):
-			new_dev = self._create_indigo_device(mac, ip, vendor, dev_name)
-			if new_dev:
-				existing_id = new_dev.id
+			# Never create a synthetic-MAC device (00:00:00:00:00:XX) unless the user
+			# has explicitly opted in.  This is the single authoritative gate — it
+			# covers every code path (new creation, existing-synth refresh, etc.)
+			# so that no synthetic device can be created regardless of how
+			# _ensure_indigo_device was reached.
+			is_synthetic = mac.lower().startswith("00:00:00:00:00:")
+			synthetic_ok = self.pluginPrefs.get("syntheticDevicesEnabled", kDefaultPluginPrefs["syntheticDevicesEnabled"])
+			if is_synthetic and not synthetic_ok:
+				return   # synthetic devices disabled — do not create or update
+
+			# Skip creating brand-new devices during the startup grace period.
+			# ARP/tcpdump have not had enough time to populate _known from the saved
+			# state; phantom MACs from proxy-ARP routers or one-shot probe frames
+			# would otherwise get permanent Indigo devices.  Existing devices are
+			# still updated above; only genuinely-new MACs are deferred until after
+			# the grace period clears.
+			if not self.in_grace_period:
+				# Claim this MAC atomically before calling Indigo so a second
+				# thread (e.g. secondary-interface sweep) racing here finds the
+				# sentinel and exits without creating a duplicate device.
+				_SENTINEL = -1
+				with self._known_lock:
+					if self._known.get(mac, {}).get("indigo_device_id") is not None:
+						return   # another thread already created or is creating it
+					self._known.setdefault(mac, {})["indigo_device_id"] = _SENTINEL
+				new_dev = self._create_indigo_device(mac, ip, vendor, dev_name)
+				if new_dev:
+					existing_id = new_dev.id
+					with self._known_lock:
+						self._known.setdefault(mac, {})["indigo_device_id"] = new_dev.id
+				else:
+					# Creation failed — clear sentinel so next sweep can retry
+					with self._known_lock:
+						entry = self._known.get(mac, {})
+						if entry.get("indigo_device_id") == _SENTINEL:
+							entry.pop("indigo_device_id", None)
 
 		if existing_id is not None:
 			if not self._cache_enabled(existing_id):
@@ -3788,28 +4124,51 @@ class Plugin(indigo.PluginBase):
 	###----------------------------------------------------------###
 	def _create_indigo_device(self, mac: str, ip: str, vendor: str, name: str):
 		"""Create a brand-new Indigo networkDevice."""
+		# Synthetic MACs (00:00:00:00:00:XX) are ping-only hosts with no ARP presence —
+		# set pingMode at creation so the device is never probed as a normal ARP device.
+		is_synthetic = mac.lower().startswith("00:00:00:00:00:")
 		props = {
 			"address":          mac,    # shows in Indigo device list Address column
-			"pingMode":         "confirm",
+			"pingMode":         "pingOnly" if is_synthetic else "confirm",
 			"offlineThreshold": "0",    # 0 = use plugin-wide default
 		}
 		folder_id = self._get_or_create_folder()
 		try:
-			# Resolve any name collision — another device may already have this name.
+			# Resolve any name collision — use indigo.devices.iter(filter="") to include
+			# disabled devices, which Indigo still enforces uniqueness for.
+			_all_names   = {d.name for d in indigo.devices.iter(filter="")}
 			_create_name = name
 			_suffix      = 0
-			while _create_name in [d.name for d in indigo.devices]:
+			while _create_name in _all_names:
 				_suffix     += 1
 				_create_name = f"{name} ({_suffix})"
-			new_dev = indigo.device.create(
-				protocol     = indigo.kProtocol.Plugin,
-				name         = _create_name,
-				description  = _ip_for_notes(ip),   # Notes = IP (last octet padded)
-				pluginId     = PLUGIN_ID,
-				deviceTypeId = DEVICE_TYPE_ID,
-				props        = props,
-				folder       = folder_id,
-			)
+			try:
+				new_dev = indigo.device.create(
+					protocol     = indigo.kProtocol.Plugin,
+					name         = _create_name,
+					description  = _ip_for_notes(ip),   # Notes = IP (last octet padded)
+					pluginId     = PLUGIN_ID,
+					deviceTypeId = DEVICE_TYPE_ID,
+					props        = props,
+					folder       = folder_id,
+				)
+			except ValueError as ve:
+				if "NameNotUniqueError" not in str(ve):
+					raise
+				# Race condition or disabled-device blind spot: a device with this name
+				# already exists.  Find it and reuse it rather than failing.
+				new_dev = next(
+					(d for d in indigo.devices.iter(filter="") if d.name == _create_name),
+					None
+				)
+				if new_dev is None:
+					raise   # genuinely can't find it — re-raise original error
+				self.indiLOG.log(20,
+					f"Device '{_create_name}' already existed (name collision) — reusing id {new_dev.id}"
+				)
+				with self._known_lock:
+					self._known.setdefault(mac, {})["indigo_device_id"] = new_dev.id
+				return new_dev
 			new_dev.updateStateOnServer("created", value=_now_str())
 			# Always log new device creation — important event regardless of debug settings.
 			# Re-attempt vendor lookup in case the table finished loading since first seen.
@@ -4254,9 +4613,10 @@ class Plugin(indigo.PluginBase):
 					entry.setdefault("history",         [])
 					entry.setdefault("ip_history",      [])
 					entry.setdefault("local_name",      "")
-					entry.setdefault("name",            "")
-					entry.setdefault("curlPort",        None)
-					entry.setdefault("curlUseless",     0)
+					entry.setdefault("name",             "")
+					entry.setdefault("curlPort",         None)
+					entry.setdefault("curlUseless",      0)
+					entry.setdefault("curlPingMismatch", 0)
 					entry.setdefault("last_indigo_push",  0)
 					entry.setdefault("is_ap_or_router",  False)
 					entry.setdefault("ip_change_times",  [])
@@ -4265,6 +4625,44 @@ class Plugin(indigo.PluginBase):
 						r for r in entry["ip_history"]
 						if r.get("old_ip") != "0.0.0.0" and r.get("new_ip") != "0.0.0.0"
 					][-20:]
+				# Scrub stale device IDs from all _known entries.
+				# live_ids = every plugin device currently in Indigo.
+				# • Synthetic MACs (00:00:00:00:00:XX) with a dead ID → delete the
+				#   whole entry; they are ephemeral and should be rediscovered fresh.
+				# • Real MACs with a dead ID → clear just the indigo_device_id so the
+				#   entry's history/IP/vendor is preserved for re-association, but the
+				#   sentinel check in _ensure_indigo_device is not fooled into blocking
+				#   device recreation.
+				live_ids      = {dev.id for dev in indigo.devices.iter(PLUGIN_ID)}
+				# Also build a set of MACs that have a live device, for synthetic check
+				live_macs     = {dev.states.get("MACNumber", "").lower()
+				                 for dev in indigo.devices.iter(PLUGIN_ID)}
+				synth_purged  = []
+				stale_cleared = []
+				for mac in list(self._known):
+					dev_id = self._known[mac].get("indigo_device_id")
+					if mac.startswith("00:00:00:00:00:"):
+						# Synthetic MACs are ephemeral — remove the entry unless a live
+						# Indigo device still claims this MAC (regardless of stored ID).
+						if mac not in live_macs:
+							synth_purged.append(mac)
+							del self._known[mac]
+					else:
+						# Real MAC — only act when there is a stale non-None, non-sentinel ID
+						if dev_id is None or dev_id == -1 or dev_id in live_ids:
+							continue   # no ID, sentinel in progress, or device is alive
+						stale_cleared.append(mac)
+						self._known[mac].pop("indigo_device_id", None)
+				if synth_purged:
+					self.indiLOG.log(20,
+						f"Startup: removed {len(synth_purged)} orphaned synthetic entry(s) from state: "
+						+ ", ".join(synth_purged)
+					)
+				if stale_cleared:
+					self.indiLOG.log(20,
+						f"Startup: cleared stale device ID from {len(stale_cleared)} known entry(s) "
+						f"(Indigo device was deleted): " + ", ".join(stale_cleared)
+					)
 				self.indiLOG.log(20, f"Loaded {len(self._known)} known devices from state file.")
 			except Exception as e:
 				self.indiLOG.log(30, f"Could not load state file: {e}")
@@ -4524,7 +4922,6 @@ class Plugin(indigo.PluginBase):
 				lines.append(f"    mdnsServices    : {states.get('mdnsServices',     '') or '—'}")
 				lines.append(f"    mdnsModel       : {states.get('mdnsModel',        '') or '—'}")
 				lines.append(f"    osHint          : {states.get('osHint',           '') or '—'}")
-				lines.append(f"    netbiosName     : {states.get('netbiosName',      '') or '—'}")
 				lines.append(f"    openPorts       : {states.get('openPorts',        '') or '—'}")
 				lines.append(f"    comment         : {states.get('comment',          '') or '—'}")
 				lines.append(f"    fingscanInfo    : {states.get('fingscanDeviceInfo','') or '—'}")
@@ -4586,7 +4983,7 @@ class Plugin(indigo.PluginBase):
 			"MACNumber", "ipNumber", "hardwareVendor", "localName",
 			"dhcpHostname", "dhcpOsFingerprint",
 			"mdnsServices", "mdnsModel", "deviceType", "appleModel", "osVersion",
-			"osHint", "netbiosName", "networkInterface",
+			"osHint", "networkInterface",
 			"pingMs", "openPorts",
 			"created", "changeToOn", "changeToOff", "lastOnOffChange", "setOnBy", "setOffBy",
 		]

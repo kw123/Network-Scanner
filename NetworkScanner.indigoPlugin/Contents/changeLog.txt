@@ -1,6 +1,116 @@
  Network Scanner – Indigo Plugin
 Change Log
 ================================================================================
+Version 2026.5.36 (2026-04-21)
+1. syntheticDevicesEnabled opt-in gate moved before ping checks:
+     When syntheticDevicesEnabled is False the entire thresholds-met block now
+     exits immediately with a continue before running /sbin/ping.  Previously
+     the 6-second ping ran even when the feature was off, wasting CPU on every
+     expired pending entry.
+
+2. _DEBUG_FORCE_PING_OK constant added for emulation testing:
+     Setting _DEBUG_FORCE_PING_OK = True at the top of plugin.py forces
+     ping_ran=True / ping_ok=True in both the existing-synth refresh path and
+     the new-device creation path, allowing synthetic device creation to be
+     tested without a real unreachable host.  Must be False in production.
+
+3. Fixed duplicate synthetic device creation race condition:
+     Two sweep threads (primary + secondary interface) could both see
+     existing_id=None for the same synthetic MAC and both call
+     _create_indigo_device simultaneously, producing Net_00:00:00:00:00:XX
+     and Net_00:00:00:00:00:XX (1) for the same IP.  Fixed by writing a
+     sentinel (-1) into _known[mac]["indigo_device_id"] under _known_lock
+     before calling Indigo; any concurrent thread that re-checks finds the
+     sentinel and returns immediately.
+
+4. Removed temporary _create_indigo_device traceback diagnostic:
+     The call-stack log added to identify the creation path has been removed
+     now that the root cause (existing_synth bypass + race condition) is fixed.
+
+5. Verification ping added to existing-synth refresh path:
+     The existing_synth branch (refreshing a synthetic device already in _known)
+     now runs a quick /sbin/ping -c 1 -t 2 before calling _register_device.
+     If the ping fails the IP is a proxy-ARP ghost — the synthetic entry is
+     removed from _known so it is never retried.  Previously this path bypassed
+     all ping checks and called _register_device unconditionally every sweep.
+
+2. Fixed ping_ran / ping_ok override bug:
+     Two stray lines (ping_ran = True / ping_ok = True) immediately after the
+     try/except block were overriding the result of the subprocess call,
+     making the verification ping a no-op and causing synthetic devices to be
+     created even when /sbin/ping returned a non-zero exit code.
+
+3. Distinguished ping-command failure from ping-no-response:
+     ping_ran tracks whether /sbin/ping actually executed.  If it did not run
+     (FileNotFoundError, permission denied, timeout, etc.) the pending entry is
+     kept and no device is created — we simply retry next sweep.  If it ran but
+     got no response (returncode != 0) the IP is confirmed a ghost and the
+     pending entry is deleted permanently.
+
+4. /sbin/ping missing warning logged only once per session:
+     When /sbin/ping cannot run, a level-30 warning is written to the log.
+     A self._sbin_ping_missing_logged flag suppresses repeat messages so the
+     warning appears once per plugin session rather than once per sweep per IP.
+
+================================================================================
+Version 2026.5.33 (2026-04-21)
+1. Synthetic (ping-only) device creation is now opt-in, default OFF:
+     A new PluginConfig option "Create Synthetic Devices for Ping-Only Hosts"
+     (syntheticDevicesEnabled, default false) gates all creation of
+     00:00:00:00:00:XX synthetic MAC devices.  Previously, any IP that
+     responded to ping but had no ARP entry (e.g. because a proxy-ARP router
+     answers on behalf of the whole subnet) would eventually produce a fake
+     Indigo device — flooding the plugin with hundreds of Net_00:00… entries.
+     Existing tracking in _ping_only_pending is unaffected; enable the option
+     only if you genuinely have devices on a separate VLAN that never appear
+     in ARP.
+
+     The gate is enforced in two places:
+     a) _arp_sweep: the creation branch hits `continue` before _register_device
+        is ever called with a synthetic MAC.
+     b) _ensure_indigo_device: a hard `return` fires for any 00:00:00:00:00:XX
+        MAC when the feature is off, regardless of how _ensure_indigo_device
+        was reached (new device, existing-synth refresh, startup reload, etc.).
+        This is the single authoritative block — no code path can bypass it.
+
+2. _ping_only_pending now tracks (first_seen_ts, sweep_count) tuples:
+     Synthetic device creation now requires BOTH _PING_ONLY_NEW_DEVICE_DELAY
+     seconds (300 s) AND _PING_ONLY_MIN_SWEEPS consecutive sweeps (5) of
+     seeing the IP without any ARP reply.  Previously only the time threshold
+     was checked; many IPs could accumulate in _ping_only_pending and all
+     expire in the same sweep, creating a burst of fake devices.
+
+     Additionally, before any synthetic device is created, the plugin now
+     sends an independent verification ping (ping -c 2) directly to the IP.
+     The ARP sweep uses a fast broadcast flood that a proxy-ARP router can
+     intercept; this single-host ping mirrors what a user would run from a
+     terminal.  If the verification ping fails the IP is discarded as a
+     false positive and never retried.
+
+5. New Indigo device creation suppressed during startup grace period:
+     _ensure_indigo_device no longer calls _create_indigo_device while
+     in_grace_period is True.  Previously the grace period only gated
+     offline decisions; brand-new MACs seen during startup (from proxy-ARP
+     ghosts, one-shot probe frames, or the router answering on behalf of
+     clients) would immediately get permanent Indigo devices.  Existing
+     devices (loaded from known_devices.json) are still updated normally;
+     only genuinely-new MACs are deferred until after the grace period ends.
+
+3. Draytek / proxy-ARP TCP suspension (curlPingMismatch):
+     When ping consistently fails but the TCP curl probe succeeds, the plugin
+     now counts consecutive mismatches.  After _CURL_USELESS_LIMIT (5) in a
+     row it auto-suspends TCP probing for that device (sets curlUseless to the
+     limit) and logs a warning.  Resets when ping succeeds again.  Prevents a
+     router that answers any TCP connection from keeping devices permanently
+     marked online.
+
+4. Fixed NameNotUniqueError crash in _create_indigo_device:
+     If Indigo rejects device.create() with NameNotUniqueError (race between
+     two threads or a disabled device with the same name), the code now
+     searches all devices (including disabled) via indigo.devices.iter() to
+     find the existing device and reuse it instead of crashing.
+
+================================================================================
 Version 2026.5.32 (2026-04-21)
 1. Startup grace period — single shared flag (self.in_grace_period):
      All grace-period checks throughout the plugin (offline watchdog,

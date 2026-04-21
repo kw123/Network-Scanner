@@ -119,6 +119,15 @@ No extra threads or CPU when off</Label>
 		<Label>Automatically create an Indigo device for each new MAC address found.</Label>
 	</Field>
 
+	<Field id="syntheticDevicesEnabled" type="checkbox" defaultValue="false">
+		<Label>Create Synthetic Devices for Ping-Only Hosts</Label>
+	</Field>
+
+	<Field id="syntheticDevicesEnabledLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+		<Label>If an IP responds to ping but never appears in ARP (e.g. a device on a different VLAN), create an Indigo device for it using a synthetic MAC address (00:00:00:00:00:XX) and set it to ping-only mode.
+WARNING: some routers (proxy-ARP) answer ping on behalf of every IP on the subnet, which will flood this plugin with fake devices. Leave OFF unless you specifically need cross-VLAN monitoring.</Label>
+	</Field>
+
 	<Field id="deviceFolder" type="textfield">
 		<Label>Device Folder Name</Label>
 	</Field>
