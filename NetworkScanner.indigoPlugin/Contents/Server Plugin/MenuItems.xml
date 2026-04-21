@@ -7,98 +7,130 @@
 	</MenuItem>
 
 	<MenuItem id="pingCustomHost">
-		<Name>Ping a Device (IP or DNS)…</Name>
+		<Name>Ping a Device (IP or DNS ...</Name>
 		<ConfigUI>
 			<Field id="host" type="textfield" defaultValue="">
 				<Label>IP address or hostname</Label>
 			</Field>
+
 			<Field id="hostLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 				<Label>Enter an IP address (e.g. 192.168.1.1) or a DNS name (e.g. google.com).
 Result is written to the log and to variable networkScanner_pingDevice (on / off).</Label>
 			</Field>
+
 			<Field id="execPing" type="button">
 				<Label> </Label>
 				<Title>PING</Title>
 				<CallbackMethod>pingCustomHostButton</CallbackMethod>
 			</Field>
+
 			<Field id="result" type="textfield">
 				<Label>result</Label>
 			</Field>
+
 		</ConfigUI>
 	</MenuItem>
 
 	<MenuItem id="addDefaultExtDevices">
-		<Name>Add Internet Ping Devices…</Name>
+		<Name>Add Internet Ping Devices ...</Name>
 		<ConfigUI>
-			<Field id="introLabel" type="label">
+			<Field id="introLabel0" type="label" fontSize="small"  fontColor="darkgrey">
+				<Label>This is for convenience, can all be done manually
+				</Label>
+			</Field>
+
+			<Field id="internetPingdesp" type="label" fontColor="orange">
+				<Label>── Internet Ping Devices ────────────────────</Label>
+			</Field>
+
+			<Field id="introLabel1" type="label">
 				<Label>Select 3 providers.
- "Ping-"name devices will be created  they show up / down and ms response time
- A device "Ping-NetworkScanner Internet" will be created that reflects internet down / up = all three down / one up
- This could also be created manually</Label>
+ "Ping-"name devices will be created.
+   they show up / down and ms response time
+ A device "Ping-NetworkScanner Internet" will be created that reflects internet down / up = all three down / one up </Label>
 			</Field>
+			<Field id="introLabel2" type="label" fontSize="small"  fontColor="darkgrey">
+				<Label>This could also be created manually</Label>
+			</Field>
+
 			<Field id="extDev_google" type="checkbox" defaultValue="false">
-				<Label>google-ping  (www.google.com)</Label>
+				<Label>ping-google  (www.google.com)</Label>
 			</Field>
+
 			<Field id="extDev_yahoo" type="checkbox" defaultValue="false">
-				<Label>yahoo-ping  (www.yahoo.com)</Label>
+				<Label>ping-yahoo  (www.yahoo.com)</Label>
 			</Field>
+
 			<Field id="extDev_microsoft" type="checkbox" defaultValue="false">
-				<Label>microsoft-ping  (www.microsoft.com)</Label>
+				<Label>ping-microsoft  (www.microsoft.com)</Label>
 			</Field>
+
 			<Field id="extDev_cnn" type="checkbox" defaultValue="false">
-				<Label>cnn-ping  (www.cnn.com)</Label>
+				<Label>ping-cnn  (www.cnn.com)</Label>
 			</Field>
-			<Field id="extDev_att" type="checkbox" defaultValue="false">
-				<Label>att-ping  (www.att.com)</Label>
-			</Field>
+
 			<Field id="extDev_siemens" type="checkbox" defaultValue="false">
-				<Label>siemens-ping  (www.siemens.com)</Label>
+				<Label>ping-siemens  (www.siemens.de</Label>
 			</Field>
+
+			<Field id="extDev_sap" type="checkbox" defaultValue="false">
+				<Label>ping-sap  (www.sap.de)</Label>
+			</Field>
+
+			<Field id="extDev_indigodomo" type="checkbox" defaultValue="false">
+				<Label>ping-indigodomo  (www.indigodomo.com)</Label>
+			</Field>
+
 			<Field id="customHostSeparator" type="label" fontSize="small" fontColor="darkgrey">
 				<Label>── Custom host ──────────────────────────────</Label>
 			</Field>
+
 			<Field id="customHost" type="textfield" defaultValue="">
 				<Label>Hostname or IP (e.g. www.welt.de)</Label>
 			</Field>
+
 			<Field id="customHostLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 				<Label>Leave blank to skip. Device name will be "Ping-{hostname}".</Label>
 			</Field>
+
 			<Field id="addDefaultExtDevices" type="button">
 				<Label> </Label>
 				<Title>Add Selected Ping Devices</Title>
 				<CallbackMethod>addDefaultExternalDevices</CallbackMethod>
 			</Field>
+
 			<Field id="extDevMsg" type="label" alignWithControl="true" fontSize="small" fontColor="green">
 				<Label>Check providers above then click the button. Placed in the Device Folder. Safe to click multiple times — skips any host that already exists.</Label>
 			</Field>
+
 			<Field id="extDevManualNote" type="label" fontSize="small" fontColor="darkgrey">
 				<Label>External devices can also be created manually via New Device → External Device.</Label>
 			</Field>
-		</ConfigUI>
-	</MenuItem>
 
-	<MenuItem id="addInternetAddressDevice">
-		<Name>Add Internet Address Device…</Name>
-		<ConfigUI>
-			<Field id="infoLabel" type="label">
-				<Label>Creates one "Internet Address" device that periodically fetches
-the public (WAN) IP address of this machine from the internet.
-The current IP is shown as the device display state "publicIp".
-Safe to click multiple times — skips creation if the device already exists.</Label>
+			<Field id="internetAddrSep" type="label" fontColor="orange">
+				<Label>── Internet Address Device ────────────────────</Label>
 			</Field>
-			<Field id="addBtn" type="button">
-				<Label> </Label>
-				<Title>Add Device</Title>
+
+			<Field id="internetAddrInfo" type="label" fontSize="small" fontColor="darkgrey">
+				<Label>Monitors the public (WAN) IP of this machine. Fetches from api.ipify.org, checkip.amazonaws.com, icanhazip.com in order. Safe to click multiple times — skips if already exists.
+	This could also be created manually</Label>
+			</Field>
+
+			<Field id="addInternetAddrBtn" type="button">
+				<Label>Add Internet Address device</Label>
+				<Title>ADD</Title>
 				<CallbackMethod>addInternetAddressDevice</CallbackMethod>
 			</Field>
-			<Field id="resultMsg" type="label" alignWithControl="true" fontSize="small" fontColor="green">
+		
+			<Field id="internetAddrMsg" type="label" alignWithControl="true" fontSize="small" fontColor="green">
 				<Label> </Label>
 			</Field>
+
 		</ConfigUI>
 	</MenuItem>
 
 	<MenuItem id="scanOpenPorts">
-		<Name>Scan Open Ports on All Online Devices…</Name>
+		<Name>Scan Open Ports on All Online Devices ...</Name>
 		<CallbackMethod>scanOpenPorts</CallbackMethod>
 	</MenuItem>
 
@@ -108,77 +140,107 @@ Safe to click multiple times — skips creation if the device already exists.</L
 			<Field id="MSG" type="label" defaultValue="">
 				<Label> </Label>
 			</Field>
+
 			<Field id="devId" type="menu" defaultValue="0">
 				<Label>Select device:</Label>
 				<List class="self" filter="all" method="filterNetworkAllDevices" dynamicReload="true"/>
 			</Field>
+
 			<Field id="refreshCallbackMethod" type="textfield" defaultValue="dynamicCallbackSetDeviceID" hidden="true"/>
 			<Field id="stateName" type="menu">
 				<Label>Select state to overwrite:</Label>
 				<List class="self" filter="" method="selectState" dynamicReload="true"/>
 			</Field>
+
 			<Field id="oldValue" type="textfield" readonly="true">
 				<Label>Current value:</Label>
 			</Field>
+
 			<Field id="newValue" type="textfield">
 				<Label>New value:</Label>
 			</Field>
+
 			<Field id="newValueUi" type="textfield">
 				<Label>New UI value (leave blank to ignore):</Label>
 			</Field>
+
 			<Field id="executeOverwrite" type="button">
 				<Label> </Label>
 				<Title>OVERWRITE</Title>
 				<CallbackMethod>executeOverwriteButtonState</CallbackMethod>
 			</Field>
+
 		</ConfigUI>
 	</MenuItem>
 
 
 	<MenuItem id="manageIgnoredMacs">
-		<Name>Manage Ignored MAC Addresses…</Name>
+		<Name>Manage Ignored MAC Addresses ...</Name>
 		<ConfigUI>
 			<Field id="availableDevicesList" type="list" rows="8">
 				<Label>Discovered Devices  (click to select)</Label>
 				<List class="self" filter="available" method="getNetworkDeviceList" dynamicReload="true"/>
 			</Field>
+
 			<Field id="addToIgnoredButton" type="button">
 				<Label> </Label>
 				<Title>▼  Ignore Selected Device</Title>
 				<CallbackMethod>addToIgnored</CallbackMethod>
 			</Field>
+
 			<Field id="ignoredDevicesList" type="list" rows="5">
 				<Label>Ignored Devices  (click to select)</Label>
 				<List class="self" filter="ignored" method="getIgnoredDeviceList" dynamicReload="true"/>
 			</Field>
+
 			<Field id="removeFromIgnoredButton" type="button">
 				<Label> </Label>
 				<Title>▲  Un-ignore Selected Device</Title>
 				<CallbackMethod>removeFromIgnored</CallbackMethod>
 			</Field>
+
 		</ConfigUI>
 	</MenuItem>
 
 
-	<MenuItem id="printStuff">
-		<Name>---- print tools ---</Name>
-	</MenuItem>
-
-	<MenuItem id="listKnownDevices">
-		<Name>Print All Discovered Devices</Name>
-		<CallbackMethod>listKnownDevices</CallbackMethod>
-	</MenuItem>
-
-	<MenuItem id="printIpChangedDevices">
-		<Name>Print Devices with IP Address Changes</Name>
-		<CallbackMethod>printIpChangedDevices</CallbackMethod>
-	</MenuItem>
-
-	<MenuItem id="printInstableDevices">
-		<Name>Print devices that have frequent on and off…</Name>
+	<MenuItem id="printReports">
+		<Name>Print tools ...</Name>
 		<ConfigUI>
+
+			<Field id="sec1" type="label" fontColor="orange">
+				<Label>── Device Lists ─────────────────</Label>
+			</Field>
+
+			<Field id="btnAllDevices" type="button">
+				<Label>All discovered devices</Label>
+				<Title>PRINT</Title>
+				<CallbackMethod>listKnownDevices</CallbackMethod>
+			</Field>
+
+			<Field id="btnByState" type="button">
+				<Label>Devices grouped by OS / ports / type</Label>
+				<Title>PRINT</Title>
+				<CallbackMethod>listDevicesByState</CallbackMethod>
+			</Field>
+
+			<Field id="btnIpChanged" type="button">
+				<Label>Devices with IP address changes</Label>
+				<Title>PRINT</Title>
+				<CallbackMethod>printIpChangedDevices</CallbackMethod>
+			</Field>
+
+			<Field id="btnEmptyStates" type="button">
+				<Label>Empty states across all devices = not used</Label>
+				<Title>PRINT</Title>
+				<CallbackMethod>listEmptyStates</CallbackMethod>
+			</Field>
+
+			<Field id="sec2" type="label" fontColor="orange">
+				<Label>── Instability Report ──────────────</Label>
+			</Field>
+
 			<Field id="cutoff" type="menu" defaultValue="300">
-				<Label>only look at devs with time between on off less than</Label>
+				<Label>Max time between on/off flips</Label>
 				<List>
 					<Option value="60">1 minute</Option>
 					<Option value="120">2 minutes</Option>
@@ -190,17 +252,17 @@ Safe to click multiple times — skips creation if the device already exists.</L
 					<Option value="480">8 minutes</Option>
 				</List>
 			</Field>
-			<Field id="execprintInstableDevices" type="button">
+
+			<Field id="btnInstable" type="button" alignWithControl="true">
 				<Label> </Label>
 				<Title>PRINT</Title>
 				<CallbackMethod>printInstableDevices</CallbackMethod>
 			</Field>
-		</ConfigUI>
-	</MenuItem>
 
-	<MenuItem id="printSeenStats">
-		<Name>Print Seen-Interval Statistics…</Name>
-		<ConfigUI>
+			<Field id="sec3" type="label" fontColor="orange">
+				<Label>── Seen-Interval Statistics ────────────</Label>
+			</Field>
+
 			<Field id="sortOrder" type="menu" defaultValue="ip">
 				<Label>Sort by</Label>
 				<List>
@@ -209,31 +271,78 @@ Safe to click multiple times — skips creation if the device already exists.</L
 					<Option value="lastseen">Last seen</Option>
 				</List>
 			</Field>
-			<Field id="execPrint" type="button">
+
+			<Field id="btnSeenStats" type="button" alignWithControl="true">
 				<Label> </Label>
 				<Title>PRINT</Title>
 				<CallbackMethod>printSeenStats</CallbackMethod>
 			</Field>
+
+			<Field id="btnResetStats" type="button">
+				<Label>Reset seen-interval counters</Label>
+				<Title>RESET</Title>
+				<CallbackMethod>resetSeenStats</CallbackMethod>
+			</Field>
+
 		</ConfigUI>
 	</MenuItem>
 
-	<MenuItem id="resetSeenStats">
-		<Name>Reset Seen-Interval Statistics</Name>
-		<CallbackMethod>resetSeenStats</CallbackMethod>
+	<MenuItem id="trackDeviceLogging">
+		<Name>Track Device / Logging Tools ...</Name>
+		<ConfigUI>
+
+			<Field id="trackSep" type="label" fontColor="orange">
+				<Label>── Track Specific Device ────────────────────</Label>
+			</Field>
+
+			<Field id="debugTrackedDevice" type="textfield">
+				<Label>Track Device (MAC or IP)</Label>
+			</Field>
+
+			<Field id="debugTrackedDeviceLabel" type="label" alignWithControl="true" fontSize="small" fontColor="green">
+				<Label>One or more MACs / IPs, comma-separated  (e.g.  aa:bb:cc:dd:ee:ff, 192.168.1.5). Logs every raw tcpdump line, ARP entry, ping probe and state change for all listed devices to plugin.log. No Save needed — use the buttons below.</Label>
+			</Field>
+
+			<Field id="activateTrackingBtn" type="button">
+				<Label> </Label>
+				<Title>▶ Activate Tracking Now</Title>
+				<CallbackMethod>activateDeviceTracking</CallbackMethod>
+			</Field>
+
+			<Field id="stopTrackingBtn" type="button" alignWithControl="true">
+				<Label> </Label>
+				<Title>■ Stop Tracking</Title>
+				<CallbackMethod>stopDeviceTracking</CallbackMethod>
+			</Field>
+
+			<Field id="trackingActivateMsg" type="textfield" readonly="true" defaultValue="— enter MAC or IP above, then click ▶ Activate —">
+				<Label>Status</Label>
+			</Field>
+
+			<Field id="logToolsSep" type="label" fontColor="orange">
+				<Label>── Per-Device Logging ───────────────────────</Label>
+			</Field>
+
+			<Field id="turnOffDeviceLogging" type="button">
+				<Label>Turn off all per-device logging</Label>
+				<Title>TURN OFF</Title>
+				<CallbackMethod>turnOffAllDeviceLogging</CallbackMethod>
+			</Field>
+
+			<Field id="deviceLogMsg" type="textfield" readonly="true" defaultValue="">
+				<Label>Status</Label>
+			</Field>
+
+		</ConfigUI>
 	</MenuItem>
 
 	<MenuItem id="helpPlugin">
-		<Name>Help…</Name>
+		<Name>Help print to log </Name>
 		<CallbackMethod>helpPlugin</CallbackMethod>
 	</MenuItem>
 	
-	
-	<MenuItem id="Fingscan">
-		<Name>---- Fingscan Migration Tools ---</Name>
-	</MenuItem>
-
 	<MenuItem id="importFromFingscan">
-		<Name>Import info from fingscan</Name>
+		<Name>Fingscan Migration Tools...</Name>
 		<ConfigUI>
 			<Field id="MSG" type="textfield" defaultValue="">
 				<Label>msgfrom plugin: </Label>
@@ -242,14 +351,16 @@ Safe to click multiple times — skips creation if the device already exists.</L
 			<Field id="Lab0" type="label" defaultValue="">
 				<Label>(0) compare fingscan and network scanner devices </Label>
 			</Field>
+
 			<Field id="executeCompare" type="button">
-				<Title>IMPORT</Title>
+				<Title>PRINT</Title>
 				<CallbackMethod>compareFingscanToNetworkScannerDevices</CallbackMethod>
 			</Field>
 
 			<Field id="Lab1" type="label" defaultValue="">
 				<Label>(1) All devices found with matching MAC number will get a state: fingscanDeviceName = old fingscan name, ping settings </Label>
 			</Field>
+
 			<Field id="executeImport" type="button">
 				<Title>IMPORT</Title>
 				<CallbackMethod>importNamesFromFingscan</CallbackMethod>
@@ -258,10 +369,12 @@ Safe to click multiple times — skips creation if the device already exists.</L
 			<Field id="Lab2" type="label" defaultValue="">
 				<Label>(2) All devices found with matching MAC number will get a new name: oldfing_scan_name-prefix </Label>
 			</Field>
+
 			<Field id="executeOverwrite" type="button">
 				<Title>OVERWRITE</Title>
 				<CallbackMethod>overwriteDevNamesWithFingNames</CallbackMethod>
 			</Field>
+
 		</ConfigUI>
 	</MenuItem>
 

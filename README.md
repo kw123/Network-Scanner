@@ -1,6 +1,7 @@
 # Network Scanner – Indigo Plugin
 
-Discovers all devices on the local LAN and creates one Indigo device per unique MAC address found. The device's on/off state reflects whether the physical device is currently reachable on the network.
+- **Discovers all devices** on the local LAN and creates one Indigo device per unique MAC address found.
+The device's on/off state reflects whether the physical device is currently reachable on the network.
 
 Beyond basic LAN scanning the plugin provides:
 
@@ -35,14 +36,32 @@ No third-party packages required.
 
 1. **Passive traffic sniffing** — `tcpdump` listens for ARP, mDNS (port 5353) and DHCP (ports 67/68). Any matching packet updates the device's last-seen timestamp. Catches devices that suppress ARP (iOS privacy mode, VMs, IoT). Each MAC throttled to one Indigo update per 30 s. Requires sudo password if tcpdump does not already have the BPF entitlement.
 
-2. **Active ARP sweep** — sends parallel ICMP pings to every host on the subnet, then reads the kernel ARP cache with `arp -a`. Only devices that actually respond to ping or TCP probe have their last-seen updated. Stale cache entries do not count as online.
+2. **Active ARP sweep** — sends parallel ICMP pings to every host on the subnet, then reads the kernel ARP cache with `arp -a`. Only devices that actually respond to ping or TCP probe have their last-seen updated. Stale cache entries do not count as online. After processing, the plugin runs `sudo arp -d -a` to flush the ARP cache so stale entries from powered-off devices do not persist into the next cycle (requires sudo password). The `arp -a` output also captures the network interface (`en0` = Wi-Fi, `en1` = Ethernet) for each device → stored in `networkInterface`.
 
 3. **Periodic reachability probe** — runs every scan-interval:
-   - ICMP ping via Python socket (no subprocess, no root)
+   - ICMP ping via Python socket (no subprocess, no root) — records round-trip time (`pingMs`) and IP TTL.
+   - TTL is used to derive a fallback OS hint when no better source is available: 128 → Windows · 64 → Linux / macOS / iOS · 255 → Router / network gear.
    - TCP connect fallback on ports 80 → 443 → 22 → 8080 if ICMP is blocked. `ConnectionRefusedError` counts as alive.
    - Winning TCP port remembered per device and tried first next time.
    - After 5 consecutive all-port failures the TCP probe is suspended (auto-resets when ping succeeds).
    - Per-device **Ping only** option skips TCP fallback entirely.
+   - **Sweep-freshness skip:** if the ARP sweep confirmed the device within the last `scan-interval − 10 s`, the per-device probe is skipped — the sweep result is used directly, reducing redundant probing.
+   - **False-positive guard:** when a device that is currently offline gets a positive ICMP response, a TCP probe is run as confirmation before the device is brought back online. Routers/gateways proxy ICMP for their ARP-cached neighbours but do not proxy TCP, so a TCP reply (connect or RST) proves the device's own stack is running. For `pingOnly` devices or those where TCP has never worked, a second ICMP ping is used instead (1-second gap).
+
+4. **DHCP enrichment** — the separate DHCP sniffer (`tcpdump -vv` on ports 67/68) extracts:
+   - **Option 12** (hostname) → `dhcpHostname`. Populated only when a device sends a DHCP request — typically on first connect or lease renewal (can take hours for already-connected devices).
+   - **Option 55** (parameter request list) → `dhcpOsFingerprint`. The sequence of option numbers acts as an OS fingerprint: Windows `{249,252}` · Apple macOS/iOS `[_, 121, ...]` · Linux `{28,2}` · Android `{33,26}`. Same timing constraint as dhcpHostname.
+
+5. **mDNS / Bonjour enrichment** — `dns-sd` browses all advertised service types every 5 minutes and resolves TXT records:
+   - `md=` field → `mdnsModel` (e.g. `HomePod mini`, `BRAVIA XR`)
+   - `am=` field → `appleModel` (Apple internal model code, e.g. `AudioAccessory1,1`)
+   - `osxvers=` field → `osVersion` (macOS/iOS kernel version)
+   - Advertised service types → `mdnsServices` and → `deviceType` (derived via priority-ordered service map: `_airplay._tcp` = Smart Speaker / AV · `_ipp._tcp` = Printer · etc.)
+   - Only devices that **actively advertise mDNS services** populate these states. Generic routers, many Android devices, and most Windows PCs do not.
+
+6. **NetBIOS** — `nmblookup -A` runs every 10 minutes on all online devices. Windows computer name → `netbiosName`. Requires NetBIOS/SMB port 137 to be responding (may be disabled on modern Windows).
+
+> **Note on enrichment state population:** `dhcpHostname`, `dhcpOsFingerprint` are only captured on DHCP events (device reconnect / lease renewal). `mdnsModel`, `appleModel`, `osVersion`, `deviceType` require the device to advertise mDNS services. `netbiosName` requires Windows or Samba with NetBIOS enabled. These states may remain empty for devices that are already connected with valid leases, or devices that simply do not support the relevant protocol.
 
 ---
 
@@ -68,6 +87,8 @@ No third-party packages required.
 
 | Button | Description |
 |--------|-------------|
+| **▶ Activate Tracking Now** | Validate the MAC(s)/IP(s) in *Track Specific Device* and begin detailed tracing immediately — no Save needed. |
+| **■ Stop Tracking** | Clear the tracked device list immediately. |
 | **Turn Off All Per-Device Logging** | Sets *Log Every Seen Event to File* to `false` on every managed Network Device in one click. |
 
 ### Logging Options
@@ -75,15 +96,35 @@ No third-party packages required.
 | Setting | Description |
 |---------|-------------|
 | Log New Device Created | Log when a new Indigo device is auto-created for a MAC |
-| Log Online / Offline Changes | Log online ↔ offline state transitions |
+| Log Online / Offline Changes | Log online ↔ offline state transitions. Each message includes the source, e.g. *"Device X is now ONLINE  via sweep (arp)"* or *"is now OFFLINE  [timeout]"* |
 | Online / Offline Log Destination | `plugin.log` only — or — `plugin.log` + Indigo event log |
 | Log IP Address Changes | Log when a device's IP address changes |
 | Log Every Device Seen | Verbose per-packet log (noisy) |
-| Log ARP Sweep Activity | Log sweep start / finish |
+| Log ARP Sweep Activity | Log sweep start / finish, and the ARP cache flush |
 | Log Ignored MACs Skipped | Log each time an ignored MAC is seen |
 | Log Ping / Probe Results | Log every ICMP ping and TCP probe result (noisy during sweeps) |
 | Log Tcpdump ARP Replies | Log every ARP reply captured by tcpdump including throttled ones (very noisy) |
 | Log ARP Sweep Entries | Log every entry parsed from `arp -a` during each sweep |
+
+### Per-Device Diagnostic Trace
+
+**Track Specific Device (MAC or IP)** — enter one or more comma-separated MAC addresses (`aa:bb:cc:dd:ee:ff`) or IP addresses (`192.168.1.5`) in the debug section of the configuration dialog.
+
+Use the **▶ Activate Tracking Now** button to start tracing immediately — no need to save the dialog. Use **■ Stop Tracking** to cancel. Tracking is always cleared automatically when the plugin restarts so it can never silently stay on.
+
+While active, every event touching a listed device is written to `plugin.log` at DEBUG level with a `[TRACE <target>]` prefix:
+
+| Tag | What is logged |
+|-----|----------------|
+| `raw-tcpdump` | Complete raw tcpdump output line (before any parsing or throttle) |
+| `sniff-ARP-reply` | ARP reply parsed from tcpdump |
+| `sniff-frame` | Non-ARP frame from which src MAC + IP were extracted |
+| `arp-a` | Entry parsed from `arp -a` during the sweep, with `replied` flag |
+| `_register_device` | Every call that updates `_known` and pushes to Indigo, with `source`, `changed_ip`, `skip_push` |
+| `ping-recheck` | Offline-to-online confirmation result (ICMP+TCP guard) |
+| `_state_update` | Every Indigo state write — `online_changed`, `source`, `ip_changed` |
+
+> **Validation:** the Activate button accepts only exact MAC format (`xx:xx:xx:xx:xx:xx`) or valid IPv4. Invalid entries are rejected with a descriptive error shown in the dialog.
 
 ---
 
@@ -153,14 +194,47 @@ Create via *Plugins → Network Scanner → Add Internet Address Device…* (saf
 
 ### Ping / Probe Usage
 
+The probe runs **in addition to** passive detection (ARP sweep + tcpdump). Passive detection always marks the device online immediately when traffic is seen; the probe adds a second layer of active confirmation.
+
+**Who wins — a failed ping vs a recent passive sighting?**
+
+| Offline Trigger Logic | Result |
+|---|---|
+| **AND** *(default)* | **Passive wins** — a recent ARP/tcpdump sighting keeps `timed_out = false`, so a failed ping cannot take the device offline on its own |
+| **OR** | **Ping wins** — streak alone triggers offline even if ARP/tcpdump saw the device moments ago |
+
+Ping **success** always wins regardless of mode — device goes online immediately.
+
 | Option | Behaviour | When to use |
 |--------|-----------|-------------|
-| **Online + Offline** | Probe sets both online and offline | Verbose tracking; device responds reliably |
-| **Online only** | Probe can mark online, not offline | Fast recovery when device reappears (e.g. phone returning home) |
-| **Offline only** | Probe can mark offline, not online | Fast offline when device disappears |
-| **Confirm offline** *(default)* | Probe only fires after ARP/sniff timeout is exceeded | Quiet devices — prevents premature offline |
-| **Ping only** | ICMP only, no TCP fallback | Routers, cameras, printers |
-| **Not at all** | Probe ignored; timeout alone decides offline | Passive detection is sufficient |
+| **Online + Offline** | Probe is additional to passive detection. Success → online immediately; failure → offline only when threshold + streak conditions are met (AND/OR). ICMP first, TCP fallback if ICMP blocked. | Reliable devices that respond to both ping and TCP |
+| **Online only** | Probe can only mark online, never offline. Passive timeout still handles going offline. | Fast recovery detection — phone coming home |
+| **Offline only** | Probe can only mark offline, never online. Passive still handles going online. | Fast offline detection |
+| **Confirm offline** *(default)* | Probe only fires after ARP/sniff timeout is exceeded; silent devices with infrequent traffic | Most LAN devices |
+| **Ping only** | ICMP only (no TCP fallback), adaptive 60 s / 15 s interval — see below | Routers, cameras, printers, manually-added devices |
+| **Not at all** | Probe ignored; offline decided purely by ARP/sniff timeout | Passive detection is sufficient |
+
+#### Ping only — adaptive timing
+
+**Ping only** uses a dedicated probe schedule independent of the global scan interval:
+
+| Device state | Probe interval | Transition rule |
+|---|---|---|
+| **Online** | every **60 s** | Goes **offline** only after the *Offline Threshold* expires — a single missed ping is never enough |
+| **Offline** | every **15 s** | Goes **online** immediately on the **first** successful ping |
+
+This makes it suitable for devices that suppress ARP and mDNS (routers, cameras, printers) as well as devices added manually with a custom MAC where no passive traffic is expected. The *Offline Trigger Logic* and *Missed Pings Before Offline* settings are not used in this mode — the threshold alone controls the on→off transition.
+
+#### Ping only — quick retry on failure
+
+When *Offline Trigger Logic* is set to **OR** and the first ping fails while the device is online, the plugin immediately sends **2 additional ICMP pings 3 s apart** before accepting the failure — mirroring `ping -c 3 -i 3`. A single dropped packet is confirmed or dismissed within ~6 s rather than waiting for the next 15 s poll cycle.
+
+| Offline Trigger Logic | First ping fails | Action |
+|---|---|---|
+| **AND** *(default)* | No retry — threshold must also expire before offline is possible; one failure is already safe | Wait for next 15 s poll |
+| **OR** | 2 retries × 3 s apart (~6 s) | Offline only if all 3 fail |
+
+> **Note:** The 15 s / 60 s probe intervals and 2 × 3 s retry parameters are defined as named constants at the top of `plugin.py` (`_PING_ONLY_INTERVAL_ONLINE`, `_PING_ONLY_INTERVAL_OFFLINE`, `_PING_RETRY_COUNT`, `_PING_RETRY_INTERVAL`) and can be adjusted there without touching any other logic. The intervals are minimum values — the actual probe fires on the next scan-loop wake-up after the interval has elapsed.
 
 ### Offline Trigger Logic
 
@@ -173,8 +247,8 @@ Create via *Plugins → Network Scanner → Add Internet Address Device…* (saf
 
 | Setting | Description | Default |
 |---------|-------------|---------|
-| Missed Pings Before Offline | Consecutive probe failures before offline is triggered (1–5) | `1` |
-| Offline Threshold (s) | Per-device override; `0` = use plugin-wide default | `0` |
+| Missed Pings Before Offline | Consecutive probe failures before offline is triggered (1–5). Not used in *Ping only* mode. | `1` |
+| Offline Threshold (s) | Per-device override; `0` = use plugin-wide default. In *Ping only* mode this is the sole condition that triggers offline. | `0` |
 | Set IP Address | Manually override the IP address for this device. Stored in `ipNumber` state and `known_devices.json`. Will be overwritten on the next scan if the device is seen with a different IP. | — |
 | Is AP or Router | Mark this device as a proxy-ARP AP or router. IP changes from the passive sniff thread are ignored; only the ARP sweep can update its IP. Set automatically when 3 or more IP changes are detected within 10 minutes. Can be cleared here to re-enable auto-detection. | off |
 | Comment | Free-text note stored in the `comment` state | — |
@@ -192,6 +266,19 @@ Create via *Plugins → Network Scanner → Add Internet Address Device…* (saf
 | `MACNumber` | String | MAC address |
 | `localName` | String | mDNS / Bonjour hostname from `arp -a` (e.g. `iPhone.local`) |
 | `hardwareVendor` | String | Manufacturer from bundled OUI table |
+| `dhcpHostname` | String | Device hostname from DHCP option 12 — populated on DHCP request/renewal (e.g. `Karl-iPhone`). |
+| `dhcpOsFingerprint` | String | OS guess from DHCP option 55 parameter request list: `Windows` · `Apple (macOS/iOS)` · `Linux` · `Android`. Populated on DHCP events only. |
+| `mdnsServices` | String | Comma-separated mDNS service types advertised by this device (e.g. `_airplay._tcp, _raop._tcp`). Populated by passive PTR parsing and periodic `dns-sd` browse. |
+| `mdnsModel` | String | Device model string from mDNS TXT `md=` field (e.g. `HomePod mini`, `BRAVIA XR`). |
+| `deviceType` | String | Device category derived from advertised mDNS services (e.g. `Smart Speaker / AV` · `Printer` · `NAS / Server`). Only set for devices that advertise mDNS. |
+| `appleModel` | String | Apple internal model code from mDNS TXT `am=` field (e.g. `AudioAccessory1,1`, `iPhone14,5`). Apple devices only. |
+| `osVersion` | String | macOS / iOS kernel version from mDNS TXT `osxvers=` field. Apple devices only. |
+| `osHint` | String | Best-guess OS: `Windows` · `Linux/macOS/iOS` · `Android` · `Cisco/Network`. Derived from DHCP vendor class (option 60), DHCP option 55 fingerprint, or IP TTL as last resort. |
+| `netbiosName` | String | Windows computer name from NetBIOS Name Service (`nmblookup -A`). Windows / Samba devices only. |
+| `networkInterface` | String | Network interface the device was last seen on, from `arp -a` output (e.g. `en0` = Wi-Fi, `en1` = Ethernet). |
+| `pingMs` | String | Last ICMP round-trip time in ms (e.g. `12 ms`). Updated each probe cycle. |
+| `changeToOn` | String | Timestamp (`YYYY-MM-DD HH:MM:SS`) of the most recent offline → online transition. |
+| `changeToOff` | String | Timestamp (`YYYY-MM-DD HH:MM:SS`) of the most recent online → offline transition. |
 | `lastOnOffChange` | String | Timestamp of last online ↔ offline transition |
 | `created` | String | Timestamp when the Indigo device was first created |
 | `openPorts` | String | Comma-separated open TCP ports from last port scan |
@@ -288,15 +375,17 @@ indigo.server.sendEmailTo("your email address", subject=theSubject, body=theBody
 |-----------|-------------|
 | Force Immediate Rescan | Triggers an ARP sweep + ping check immediately |
 | **Ping a Device (IP or DNS)…** | Enter any IP address or DNS name, click **PING**. Result is logged and written to `networkScanner_pingDevice` as `{ip} {ms}ms on/off`. |
-| **Add Internet Ping Devices…** | Select from Google, Yahoo, Microsoft, CNN, AT&T, Siemens, or enter a **custom hostname** (e.g. `www.welt.de`). Creates External Device entries for each selected host — device name is `Ping-{host}` with `www.` stripped (e.g. `Ping-welt.de`). Safe to run multiple times — skips any host that already exists. Also auto-creates a **Ping-NetworkScanner Internet** aggregate device (watches up to 3 devices) as an instant internet up/down indicator — Address column shows the watched names without `www.` and TLD (e.g. `google · yahoo · welt`). Pings each selected host immediately after creation and logs the results. |
-| **Add Internet Address Device…** | Creates one **Internet Address** device that periodically fetches the public (WAN) IP of this machine. Services tried in order: `api.ipify.org` → `checkip.amazonaws.com` → `icanhazip.com`. Safe to click multiple times — skips if device already exists. |
+| **Add Internet Ping Devices…** | Select from Google, Yahoo, Microsoft, CNN, AT&T, Siemens, or enter a **custom hostname** (e.g. `www.welt.de`). Creates External Device entries for each selected host — device name is `Ping-{host}` with `www.` stripped. Safe to run multiple times — skips any host that already exists. Also auto-creates a **Ping-NetworkScanner Internet** aggregate device as an internet up/down indicator. This dialog also contains an **Add Internet Address device** button — see *Internet Address* device type below. |
 | Scan Open Ports on All Online Devices… | Port-scans all online devices; stores results in `openPorts` state |
-| Set a State of Device… | Manually overwrite any state on any `Net_*` device |
-| Print All Discovered Devices | Prints all known MACs with IP, local name, vendor, on/off and last-seen to plugin.log |
-| Print Devices with IP Address Changes | Lists devices whose IP address has changed since the plugin started |
-| Print devices that have frequent on and off… | Lists devices with very short on/off intervals (possible instability) |
-| Print Seen-Interval Statistics… | Histogram of how often each device is seen; sort by IP / name / last seen |
-| Reset Seen-Interval Statistics | Clears histogram counters for all devices |
+| Set a State of Device… | Manually overwrite any state on any plugin device |
+| **Print tools…** | Combined reporting dialog with the following buttons: |
+| ↳ All discovered devices | Prints all known MACs with IP, local name, vendor, on/off and last-seen to plugin.log |
+| ↳ Devices grouped by OS / ports / type | Groups networkDevices by `osHint`, `osVersion`, `dhcpOsFingerprint`, `deviceType`, `networkInterface`, and open port. Only populated buckets are shown. |
+| ↳ Devices with IP address changes | Lists devices whose IP address has changed since the plugin started |
+| ↳ Devices with empty states | Lists all enrichment state names that are empty across **every** networkDevice — quick check of which data sources have not yet populated any devices. |
+| ↳ Instability report | Lists devices with very short on/off intervals (configurable cutoff: 1–8 minutes) |
+| ↳ Seen-interval statistics | Histogram of how often each device is seen; sort by IP / name / last seen |
+| ↳ Reset seen-interval counters | Clears histogram counters for all devices |
 | Manage Ignored MAC Addresses… | Exclude / re-include specific MACs from scanning |
 | Help… | Prints full help text to plugin.log |
 
@@ -362,9 +451,13 @@ Ignored MACs are neither created nor updated by the scanner.
 ## Startup Behaviour
 
 - Plugin-managed Indigo variables are created if they don't exist yet.
-- Offline changes are suppressed for the configured grace period so sniffing and the first sweep can re-confirm all devices.
 - `known_devices.json` is loaded at startup — previously discovered devices are immediately available.
 - Each managed device gets a deferred port scan 15 s after startup.
+- A **startup grace period** (`self.in_grace_period`) is active from plugin start until the configured *Ignore offline changes at startup* duration expires. While the flag is `True`:
+  - Offline state changes are suppressed — sniffing and the first sweep have time to re-confirm devices before anything is marked offline.
+  - Ping-only candidate detection is skipped — no "no ARP entry" candidates are evaluated and no synthetic MAC devices are created until after the grace period, preventing false positives when ARP/tcpdump has not yet had time to populate `_known`.
+  - The `passive-info` debug log is silenced — bulk state updates from the first sweep do not flood the log.
+- The flag is set to `False` by `runConcurrentThread` (the single authoritative location) and is read directly everywhere else — no inline time calculations at the call sites.
 
 ---
 
@@ -393,4 +486,18 @@ Visible in *List All Discovered Devices* and *Print IP-Changed Devices* menu ite
 
 ---
 
-*Author: Karl Wachs — Version 2026.5.28 (2026-04-20)*
+---
+
+## Fingscan Migration
+
+Two menu items are available under *Plugins → Network Scanner* for migrating from the Fingscan plugin:
+
+| Menu Item | Description |
+|-----------|-------------|
+| **Import Names from Fingscan** | Reads all Fingscan `IP-Device` entries, matches them to NetworkScanner devices by MAC address, and writes the Fingscan device name into the `fingscanDeviceInfo` state. Logs each matched pair. |
+| **Overwrite Device Names with Fingscan Names** | Uses the imported `fingscanDeviceInfo` values to rename each NetworkScanner device to `{fingscan-name}-NET_`. Only renames devices where `fingscanDeviceInfo` is non-empty. |
+| **Compare Fingscan ↔ NetworkScanner** | Prints a side-by-side report showing: devices in Fingscan only, devices in NetworkScanner only, and devices in both with a conflicting online/offline state. |
+
+---
+
+*Author: Karl Wachs*

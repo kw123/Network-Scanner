@@ -13,18 +13,32 @@
 		<Label>!!! your macOS login password — needed so tcpdump can open the raw network socket via sudo. !!!  
 (Leave blank if tcpdump already has the required entitlements - unlikely.)</Label>
 	</Field>
+
 	
 	<Field id="optional" type="label">
 		<Label>── The following settings should work as they are by default ──</Label>
 	</Field>
 
-	<Field id="networkInterface" type="textfield">
-		<Label>Network Interface</Label>
-	</Field>
-	<Field id="networkInterfaceLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
-		<Label>Interface to sniff (e.g. en0, eth0). Leave blank to auto-detect.</Label>
+	<Field id="networkInterface" type="menu" defaultValue="_auto">
+		<Label>Network Interface  (primary)</Label>
+		<List class="self" method="getActiveIfaceList" dynamicReload="true"/>
 	</Field>
 
+	<Field id="networkInterfaceLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+		<Label>List shows only interfaces that are currently UP and have an IP address.
+Auto-detect picks the first Ethernet/LAN port, falling back to Wi-Fi.
+The chosen interface is logged at plugin startup.</Label>
+	</Field>
+
+	<Field id="networkInterface2" type="menu" defaultValue="_none">
+		<Label>Network Interface  (second, optional)</Label>
+		<List class="self" method="getActiveIfaceList2" dynamicReload="true"/>
+	</Field>
+
+	<Field id="networkInterface2Label" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+		<Label>Optional second interface (e.g. Wi-Fi when Ethernet is primary).
+No extra threads or CPU when off</Label>
+	</Field>
 
 	<Field id="scanInterval" type="menu">
 		<Label>Scan Interval (seconds)</Label>
@@ -35,6 +49,7 @@
 			<Option value="120">120</Option>
 		</List>
 	</Field>
+
 	<Field id="scanIntervalLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 		<Label>How often to run the reachability probe (ping + curl TCP fallback) on known devices. Can be tuned per device in device edit.</Label>
 	</Field>
@@ -42,6 +57,7 @@
 	<Field id="arpSweepEnabled" type="checkbox">
 		<Label>Enable ARP Sweep</Label>
 	</Field>
+
 	<Field id="arpSweepEnabledLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 		<Label>Sweep the subnet with ARP requests to discover new devices.</Label>
 	</Field>
@@ -49,8 +65,17 @@
 	<Field id="sniffEnabled" type="checkbox">
 		<Label>Enable Passive Traffic Sniffing</Label>
 	</Field>
+
 	<Field id="sniffEnabledLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 		<Label>Passively capture all ethernet traffic via tcpdump to detect any active device — not just ARP. Catches devices that suppress ARP responses. Each MAC is throttled to one update per 5 s. Requires sudo password below if tcpdump does not already have the BPF entitlement.</Label>
+	</Field>
+
+	<Field id="mdnsQueryEnabled" type="checkbox" defaultValue="false">
+		<Label>Enable Active mDNS Query</Label>
+	</Field>
+
+	<Field id="mdnsQueryEnabledLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+		<Label>Send an mDNS PTR query at the start of each ARP sweep to prompt all mDNS-capable devices to announce themselves. Useful for discovering devices hidden behind proxy-ARP access points (e.g. HomePod, AirPort Express). Responses are captured automatically by the passive sniff thread — no extra processing needed.</Label>
 	</Field>
 
 	<Field id="offlineThreshold" type="menu">
@@ -67,6 +92,7 @@
 			<Option value="420">420</Option>
 		</List>
 	</Field>
+
 	<Field id="offlineThresholdLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 		<Label>Mark a device offline if not seen for this many seconds, can be overwritten in device edit for each device.</Label>
 	</Field>
@@ -80,6 +106,7 @@
 			<Option value="80">80</Option>
 		</List>
 	</Field>
+
 	<Field id="startupGracePeriodLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 		<Label>Do not mark any device offline for this many seconds after the plugin starts. Gives ARP sniffing time to re-confirm all devices.</Label>
 	</Field>
@@ -87,6 +114,7 @@
 	<Field id="autoCreateDevices" type="checkbox">
 		<Label>Auto-Create Indigo Devices</Label>
 	</Field>
+
 	<Field id="autoCreateDevicesLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 		<Label>Automatically create an Indigo device for each new MAC address found.</Label>
 	</Field>
@@ -94,14 +122,15 @@
 	<Field id="deviceFolder" type="textfield">
 		<Label>Device Folder Name</Label>
 	</Field>
+
 	<Field id="deviceFolderLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 		<Label>Place auto-created Net_* devices in this Indigo folder (created if needed). Leave blank for root.</Label>
 	</Field>
 
-
 	<Field id="variableFolder" type="textfield" >
 		<Label>Variable Folder Name</Label>
 	</Field>
+
 	<Field id="variableFolderLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 		<Label>Place plugin-created variables (e.g. networkScanner_newdevice) in this Indigo variable folder (created if needed). Leave blank for root.</Label>
 	</Field>
@@ -109,6 +138,7 @@
 	<Field id="prefixName" type="textfield">
 		<Label>Prefix Name</Label>
 	</Field>
+
 	<Field id="prefixNameLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 		<Label>prefix for device name seg
  "NET_34:7E:5C:FC:B0:8E"</Label>
@@ -117,41 +147,41 @@
 	<Field id="debugSeparator" type="label">
 		<Label>── Logging ──────────────────────────</Label>
 	</Field>
+
 	<Field id="showdebugsection" type="checkbox">
 		<Label>Show debug section</Label>
 	</Field>
+
 	<Field id="debucomment" type="label"  fontSize="small" fontColor="darkgrey" visibleBindingId="showdebugsection" visibleBindingValue="true">
 		<Label>Most logging goes to the file:
 ... /Perceptive Automation/Indigo xx.y/Logs/com.karlwachs.networkscanner/plugin.log</Label>
 	</Field>
 
-	<Field id="turnOffDeviceLogging" type="button" visibleBindingId="showdebugsection" visibleBindingValue="true">
-		<Label> </Label>
-		<Title>Turn Off All Per-Device Logging</Title>
-		<CallbackMethod>turnOffAllDeviceLogging</CallbackMethod>
-	</Field>
-	<Field id="deviceLogMsg" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey" visibleBindingId="showdebugsection" visibleBindingValue="true">
-		<Label>Sets logSeenToFile = false on every managed device (Log Every Seen Event to File in device edit).</Label>
+	<Field id="trackingNote" type="label" alignWithControl="true" fontSize="small" fontColor="green" visibleBindingId="showdebugsection" visibleBindingValue="true">
+		<Label>Device tracking and per-device log controls are in the Plugin Menu → Track Device / Logging Tools.</Label>
 	</Field>
 
 	<Field id="debugNewDevice" type="checkbox" visibleBindingId="showdebugsection" visibleBindingValue="true">
 		<Label>Log New Device Created</Label>
 	</Field>
+
 	<Field id="debugNewDeviceLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey" visibleBindingId="showdebugsection" visibleBindingValue="true">
 		<Label>Log when a new Indigo device is created for a discovered MAC.</Label>
 	</Field>
+
 	
 	<Field id="debugIgnored" type="checkbox" visibleBindingId="showdebugsection" visibleBindingValue="true">
 		<Label>Log Ignored MACs Skipped</Label>
 	</Field>
+
 	<Field id="debugIgnoredLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey" visibleBindingId="showdebugsection" visibleBindingValue="true">
 		<Label>Log each time an ignored MAC is seen and skipped.</Label>
 	</Field>
 
-
 	<Field id="debugStateChange" type="checkbox" visibleBindingId="showdebugsection" visibleBindingValue="true">
 		<Label>Log Online / Offline Changes</Label>
 	</Field>
+
 	<Field id="debugStateChangeLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey" visibleBindingId="showdebugsection" visibleBindingValue="true">
 		<Label>Log when a device changes between online and offline.</Label>
 	</Field>
@@ -163,6 +193,7 @@
 			<Option value="20">plugin.log + Indigo log</Option>
 		</List>
 	</Field>
+
 	<Field id="stateChangeLogLevelLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey" visibleBindingId="showdebugsection" visibleBindingValue="true">
 		<Label>Where to write the online/offline message (only used when Log Online / Offline Changes is enabled).</Label>
 	</Field>
@@ -170,6 +201,7 @@
 	<Field id="debugIpChange" type="checkbox" visibleBindingId="showdebugsection" visibleBindingValue="true">
 		<Label>Log IP Address Changes</Label>
 	</Field>
+
 	<Field id="debugIpChangeLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey" visibleBindingId="showdebugsection" visibleBindingValue="true">
 		<Label>Log when a device is seen with a different IP than before.</Label>
 	</Field>
@@ -177,6 +209,7 @@
 	<Field id="debugSeen" type="checkbox" visibleBindingId="showdebugsection" visibleBindingValue="true">
 		<Label>Log Every Device Seen</Label>
 	</Field>
+
 	<Field id="debugSeenLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey" visibleBindingId="showdebugsection" visibleBindingValue="true">
 		<Label>Log every ARP packet or sweep hit (can be noisy).</Label>
 	</Field>
@@ -184,6 +217,7 @@
 	<Field id="debugSweep" type="checkbox" visibleBindingId="showdebugsection" visibleBindingValue="true">
 		<Label>Log ARP Sweep Activity</Label>
 	</Field>
+
 	<Field id="debugSweepLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey" visibleBindingId="showdebugsection" visibleBindingValue="true">
 		<Label>Log when each ARP sweep starts and finishes.</Label>
 	</Field>
@@ -191,6 +225,7 @@
 	<Field id="debugPing" type="checkbox" visibleBindingId="showdebugsection" visibleBindingValue="true">
 		<Label>Log Ping / Probe Results</Label>
 	</Field>
+
 	<Field id="debugPingLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey" visibleBindingId="showdebugsection" visibleBindingValue="true">
 		<Label>Log every ICMP ping and TCP socket probe result to plugin.log (can be noisy during sweeps).</Label>
 	</Field>
@@ -198,6 +233,7 @@
 	<Field id="debugTcpdumpArp" type="checkbox" visibleBindingId="showdebugsection" visibleBindingValue="true">
 		<Label>Log Tcpdump ARP Replies</Label>
 	</Field>
+
 	<Field id="debugTcpdumpArpLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey" visibleBindingId="showdebugsection" visibleBindingValue="true">
 		<Label>Log every ARP reply captured by tcpdump (passive sniff), including throttled ones. Very noisy on busy networks — use for proxy-ARP / IP-churn diagnosis.</Label>
 	</Field>
@@ -205,6 +241,7 @@
 	<Field id="debugArpSweepEntries" type="checkbox" visibleBindingId="showdebugsection" visibleBindingValue="true">
 		<Label>Log ARP Sweep Entries (arp -a)</Label>
 	</Field>
+
 	<Field id="debugArpSweepEntriesLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey" visibleBindingId="showdebugsection" visibleBindingValue="true">
 		<Label>Log every entry parsed from  arp -a  during each sweep cycle, with replied/cache-only status. Use to diagnose proxy-ARP deduplication.</Label>
 	</Field>

@@ -1,6 +1,188 @@
  Network Scanner – Indigo Plugin
 Change Log
 ================================================================================
+Version 2026.5.32 (2026-04-21)
+1. Startup grace period — single shared flag (self.in_grace_period):
+     All grace-period checks throughout the plugin (offline watchdog,
+     per-device probe loop, ARP sweep, passive-info logger) now read one
+     shared boolean set in runConcurrentThread.  Previously each site
+     recomputed (time.time() - _startup_time) < grace_period_secs()
+     independently, which was inconsistent and hard to reason about.
+
+2. Ping-only candidate detection suppressed during startup grace period:
+     The entire "responded to ping but no ARP entry" logic in _arp_sweep
+     is skipped while in_grace_period is True.  Previously the plugin
+     logged "Ping-only candidate … waiting 60 s" for every known device
+     on each restart because _ping_only_pending is an in-memory dict that
+     resets on restart and ARP/tcpdump have not had time to repopulate
+     _known yet.
+
+3. passive-info log suppressed during startup grace period:
+     The debug log line "passive-info <mac>: {…}" in _update_passive_info
+     is suppressed while in_grace_period is True.  State updates to Indigo
+     still happen; only the log is silenced.
+
+4. known_by_real check now includes ip_history:
+     When deciding whether a ping-responding IP already has a real-MAC
+     device, the check now also scans ip_history entries so a device whose
+     DHCP lease changed since the last save is not mistakenly treated as a
+     new no-ARP device.
+
+5. Fixed "name 'now' is not defined" crash in _arp_sweep:
+     now = time.time() was missing at the top of _arp_sweep; all uses of
+     now in the ping-only-pending section raised NameError at runtime.
+
+================================================================================
+Version 2026.5.31 (2026-04-21)
+1. Ping only mode — adaptive probe timing (replaces fixed scan-interval probing):
+     • Online  : probe every 60 s  (constant _PING_ONLY_INTERVAL_ONLINE)
+     • Offline : probe every 15 s — faster recovery detection
+                 (constant _PING_ONLY_INTERVAL_OFFLINE)
+     • On→Off  : only after Offline Threshold expires — one failed ping is never
+                 enough to go offline.
+     • Off→On  : immediately on first successful ping (no extra delay).
+
+2. Ping only — quick retry on first failure (OR logic only):
+     When Offline Trigger Logic = OR and the first ping fails while online,
+     2 additional ICMP pings are sent 3 s apart (~6 s total) before the failure
+     is accepted — mirrors `ping -c 3 -i 3`.  With AND logic (default) the
+     offline threshold already prevents a single failure from going offline, so
+     retries are skipped.
+     Constants: _PING_RETRY_COUNT = 2, _PING_RETRY_INTERVAL = 3 s.
+
+3. MAC override field in device edit now validated before save:
+     Invalid MAC format shows an inline error and prevents the dialog from
+     closing until corrected.
+
+4. Second network interface support — disable now logs and stops correctly:
+     Switching the secondary interface to "none" stops all secondary threads
+     (NS-Sniff2, NS-DHCP2, NS-Sweep2) and logs a confirmation message.
+     The DHCP sniffer subprocess is now properly terminated via _kill_tcpdump.
+
+5. Interface dropdown lists cross-exclude each other:
+     The primary and secondary interface menus each hide whichever port the
+     other already has selected, preventing both from being set to the same
+     interface.
+
+6. Device tracking and per-device logging controls moved to Plugin Menu:
+     New menu item "Track Device / Logging Tools …" contains the MAC/IP tracker
+     and "Turn Off All Per-Device Logging" button.  The debug section of Plugin
+     Config now shows a note pointing to the menu item.
+
+7. Interface name added to all debug log lines:
+     ARP reply, sweep ping/probe, arp -a entries, DHCP errors, and raw tcpdump
+     trace lines now include [en0] / [en1] so secondary-interface events can be
+     distinguished at a glance.
+
+8. Timing and probe constants consolidated at top of plugin.py:
+     _STARTUP_WAIT_SECS, _PROBE_POOL_DEADLINE, _CURL_USELESS_LIMIT,
+     _SWEEP_FRESHNESS_MARGIN, _PING_ONLY_INTERVAL_ONLINE/OFFLINE,
+     _PING_RETRY_COUNT, _PING_RETRY_INTERVAL.
+
+================================================================================
+Version 2026.5.30 (2026-04-21)
+1. New Network Device states — passive enrichment from existing OS tools:
+     dhcpOsFingerprint  — OS guess from DHCP option 55 parameter request list:
+                          Windows={249,252}  Apple=[_,121,...]  Linux={28,2}
+                          Android={33,26}.  Populated on DHCP events only
+                          (device reconnect / lease renewal).
+     deviceType         — device category derived from advertised mDNS service
+                          types (e.g. "Smart Speaker / AV", "Printer",
+                          "NAS / Server"). Priority-ordered map; first match wins.
+     appleModel         — Apple internal model code from mDNS TXT am= field
+                          (e.g. "AudioAccessory1,1", "iPhone14,5").
+     osVersion          — macOS / iOS kernel version from mDNS TXT osxvers= field.
+     networkInterface   — network interface from arp -a output (en0=Wi-Fi,
+                          en1=Ethernet). Populated each ARP sweep.
+     pingMs             — ICMP round-trip time in ms. Updated each probe cycle.
+     changeToOn         — YYYY-MM-DD HH:MM:SS timestamp of last offline→online.
+     changeToOff        — YYYY-MM-DD HH:MM:SS timestamp of last online→offline.
+
+2. Sweep-freshness skip: if the ARP sweep confirmed a device within the last
+   scan-interval − 10 seconds, the per-device probe is skipped and the sweep
+   result is used directly. Reduces redundant probing when sweep interval is short.
+
+3. Extended ICMP ping: now captures round-trip time and IP TTL via IP_RECVTTL
+   socket option + recvmsg(), no subprocess, no root.  TTL used to derive a
+   fallback os_hint (128=Windows · 64=Linux/macOS/iOS · 255=Router/gear) when
+   no higher-confidence source (DHCP option 60/55 or mDNS) has set one.
+
+4. mDNS resolve extended: dns-sd TXT records now parsed for am= (Apple model
+   code) and osxvers= (kernel version) in addition to md= (model string).
+
+5. Consolidated "Print tools…" menu dialog — the six separate print/reset menu
+   items are replaced by one dialog containing all buttons:
+     • All discovered devices
+     • Devices grouped by OS / ports / type  (new — see below)
+     • Devices with IP address changes
+     • Devices with empty states             (new — see below)
+     • Instability report  (cutoff 1–8 min)
+     • Seen-interval statistics  (sort by IP / name / last seen)
+     • Reset seen-interval counters
+
+6. New report "Devices grouped by OS / ports / type": groups all networkDevices
+   by osHint, osVersion, dhcpOsFingerprint, deviceType, networkInterface, and
+   each individual open port.  Buckets with no devices (empty values) are omitted.
+
+7. New report "Devices with empty states": prints the list of enrichment state
+   names that are empty across ALL networkDevices — shows at a glance which
+   data sources have not yet populated any device.
+
+8. "Add Internet Address Device" button moved inside the "Add Internet Ping
+   Devices…" dialog; the separate menu item has been removed.
+
+================================================================================
+Version 2026.5.29 (2026-04-20)
+1. Online / Offline log messages now include the triggering source:
+     "Device X (192.168.1.5) is now ONLINE  via traffic observed (tcpdump)"
+     "Device X (192.168.1.5) is now ONLINE  via sweep (arp)"
+     "Device X (192.168.1.5) is now OFFLINE  [timeout]"
+   Previously the message contained no indication of what caused the transition.
+   The setOnBy / setOffBy device states are unchanged.
+
+2. Per-device diagnostic trace — new "Track Specific Device" field in the debug
+   section of the plugin configuration dialog.
+   * Enter one or more comma-separated MACs (aa:bb:cc:dd:ee:ff) or IPs (a.b.c.d).
+   * Click "▶ Activate Tracking Now" to begin immediately — no Save required.
+     Input is validated; invalid entries are rejected with a clear error message.
+   * Click "■ Stop Tracking" to cancel at any time.
+   * Tracking is automatically cleared when the plugin restarts so it never
+     silently stays on across restarts.
+   * While active every event for the listed device(s) is written to plugin.log:
+       raw-tcpdump   — complete raw tcpdump line (before any parsing/throttle)
+       sniff-ARP-reply / sniff-frame — parsed sniff events
+       arp-a         — each arp -a entry with replied flag
+       _register_device — every _known update + Indigo push decision
+       ping-recheck  — offline→online confirmation result
+       _state_update — every Indigo state write
+
+3. ARP cache flush after each sweep: immediately after arp -a results are
+   processed, the plugin runs  sudo arp -d -a  to delete all ARP cache entries.
+   Prevents stale entries for powered-off or disabled devices from persisting
+   for up to 20 minutes.  Requires the sudo password to be configured.
+   Logged as "ARP cache flushed (arp -d -a)" when "Log ARP Sweep Activity" is on.
+
+4. False-positive ICMP ping guard: when a device that is currently offline gets
+   a positive ICMP ping response, a TCP probe is now required as confirmation
+   before the device is brought back online.
+   Routers/gateways proxy ICMP echo for their ARP-cached neighbours but do NOT
+   proxy TCP — a TCP response (connect or RST) proves the device's own stack
+   is answering.  Previously a double-ICMP check was used but the same router
+   proxy answered both pings instantly.
+   Fallback for pingOnly mode or devices where TCP has never worked: a second
+   ICMP ping with a 1-second gap (was 200 ms).
+   Trace: "ping-recheck: was_offline=True  ICMP=ok  TCP=port 80  result=online"
+      or: "ping-recheck: was_offline=True  ICMP=ok  TCP=no-response  result=FAIL"
+
+5. Fixed "Import Names from Fingscan" menu item (importNamesFromFingscan):
+   Previously crashed with KeyError on aggregate, external, and internet-address
+   devices that have no MACNumber state, silently producing 0 matches even when
+   valid Fingscan matches existed.
+   Fix: skip non-networkDevice types; use .get() for all state reads; O(1) dict
+   lookup instead of O(n²) inner loop; wrap updateStateOnServer in try/except;
+   add diagnostic log lines showing fingscan device count and each matched pair.
+
+================================================================================
 Version 2026.5.28 (2026-04-20)
 1. New device type "Internet Address": monitors the public (WAN) IP address of
    this machine by periodically fetching from well-known IP-echo services.

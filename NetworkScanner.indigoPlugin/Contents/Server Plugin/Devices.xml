@@ -10,55 +10,6 @@
 	<UiDisplayStateId>onOffState</UiDisplayStateId>
 		<Name>Network Device</Name>
 		<ConfigUI>
-			<Field id="pingMode" type="menu" defaultValue="confirm">
-				<Label>Ping / Probe Usage</Label>
-				<List>
-					<Option value="both">Online + Offline  (probe sets both)</Option>
-					<Option value="online">Online only  (probe can mark online, not offline)</Option>
-					<Option value="offline">Offline only   (probe can mark offline, not online)</Option>
-					<Option value="confirm">Confirm offline  (probe only when sniff/ARP timeout exceeded)</Option>
-					<Option value="pingOnly">Ping only  (ICMP only, no TCP fallback — for routers, cameras, printers)</Option>
-					<Option value="none">Not at all  (ignore probe results for this device)</Option>
-				</List>
-			</Field>
-			<Field id="pingModeLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
-				<Label>Controls how the probe affects online/offline state.
-Probe: ICMP ping first; falls back to TCP (80/443/22/8080)
-  if ICMP is blocked. Connection refused counts as online.
-- Online + Offline  — probe sets both on and off
-- Online only       — fast recovery when device reappears
-    (e.g. phone returning home)
-- Offline only      — fast offline when device disappears
-- Confirm offline   — probe only after ARP timeout; quiet devices
-- Ping only         — ICMP only, no TCP fallback
-    (routers, cameras, printers)
-- Not at all        — passive traffic detection only</Label>
-			</Field>
-
-			<Field id="pingOfflineLogic" type="menu" defaultValue="and">
-				<Label>Offline Trigger Logic</Label>
-				<List>
-					<Option value="and">AND — timeout expired  AND  ping failed  (default, least false-positives)</Option>
-					<Option value="or">OR  — timeout expired  OR   ping failed  (faster offline detection)</Option>
-				</List>
-			</Field>
-			<Field id="pingOfflineLogicLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
-				<Label>How probe failure and sniff/ARP timeout combine to decide offline (not used in "Online only" or "Not at all" modes).</Label>
-			</Field>
-
-			<Field id="pingMissedCount" type="menu" defaultValue="1">
-				<Label>Missed Pings Before Offline</Label>
-				<List>
-					<Option value="1">1  (first failure counts)</Option>
-					<Option value="2">2</Option>
-					<Option value="3">3</Option>
-					<Option value="4">4</Option>
-					<Option value="5">5</Option>
-				</List>
-			</Field>
-			<Field id="pingMissedCountLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
-				<Label>Consecutive failed pings needed to trigger offline. Higher values reduce false-offline on transient packet loss.</Label>
-			</Field>
 
 			<Field id="offlineThreshold" type="menu" defaultValue="0">
 				<Label>Offline Threshold (seconds)</Label>
@@ -77,6 +28,7 @@ Probe: ICMP ping first; falls back to TCP (80/443/22/8080)
 					<Option value="600">10 minutes</Option>
 				</List>
 			</Field>
+
 			<Field id="offlineThresholdLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 				<Label>Mark offline if not seen for this many seconds. 0 = use the plugin-wide default.</Label>
 			</Field>
@@ -84,6 +36,7 @@ Probe: ICMP ping first; falls back to TCP (80/443/22/8080)
 			<Field id="comment" type="textfield" defaultValue="">
 				<Label>Comment</Label>
 			</Field>
+
 			<Field id="commentLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 				<Label>Free-text note stored as a device state.</Label>
 			</Field>
@@ -91,13 +44,116 @@ Probe: ICMP ping first; falls back to TCP (80/443/22/8080)
 			<Field id="manualIpOverride" type="textfield" defaultValue="">
 				<Label>Set IP Address</Label>
 			</Field>
+
 			<Field id="manualIpOverrideLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 				<Label>Manually set the IP address for this device. Leave blank to use the auto-discovered IP. Will be overwritten on the next scan if the device is seen with a different IP.</Label>
+			</Field>
+
+			<Field id="macSeparator" type="label" fontColor="orange">
+				<Label>── MAC Address ─────────────────</Label>
+			</Field>
+
+			<Field id="currentMac" type="textfield" readonly="true" defaultValue="">
+				<Label>Current MAC</Label>
+			</Field>
+
+			<Field id="currentMacLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+				<Label>MAC address currently assigned to this device (read-only).</Label>
+			</Field>
+
+			<Field id="macOverride" type="textfield" defaultValue="">
+				<Label>Set / overwrite MAC</Label>
+			</Field>
+
+			<Field id="macOverrideWarn" type="label" alignWithControl="true" fontColor="orange">
+				<Label>⚠  WARNING — changing the MAC replaces all scan data for this device.
+The old MAC entry is removed from the scanner's memory.
+Format: aa:bb:cc:dd:ee:ff  — leave blank to keep current MAC.</Label>
+			</Field>
+			<Field id="macOverrideWarn2" type="label" alignWithControl="true" fontColor="orange">
+				<Label>Use this  to create a device that is not "visible" to normal tracking. 
+Then use use PING only.</Label>
+			</Field>
+
+			<Field id="macSeparator2" type="label" fontColor="orange">
+				<Label>── MAC Address ─────────────────</Label>
+			</Field>
+			<Field id="pingMode" type="menu" defaultValue="confirm">
+				<Label>Ping / Probe Usage</Label>
+				<List>
+					<Option value="both">Online + Offline  (probe sets both)</Option>
+					<Option value="online">Online only  (probe can mark online, not offline)</Option>
+					<Option value="offline">Offline only   (probe can mark offline, not online)</Option>
+					<Option value="confirm">Confirm offline  (probe only when sniff/ARP timeout exceeded)</Option>
+					<Option value="pingOnly">Ping only  (ICMP only, no TCP fallback — for routers, cameras, printers)</Option>
+					<Option value="none">Not at all  (ignore probe results for this device)</Option>
+				</List>
+			</Field>
+
+			<Field id="pingModeLabel" type="label"  fontSize="small" fontColor="darkgrey">
+				<Label>The probe runs IN ADDITION to passive detection (ARP sweep + tcpdump).
+Passive detection always wins for going online — it marks the device online immediately whenever traffic is seen.
+
+Probe: ICMP ping first; falls back to TCP (80/443/22/8080) if ICMP is blocked. Connection refused counts as online.
+
+Who wins — ping failure vs a recent passive sighting?
+ - AND logic (default):  passive wins — recent ARP/tcpdump sighting keeps 
+                                 "timed out" = false, so a failed ping cannot go offline.
+ - OR  logic:                ping wins  — streak alone triggers offline even if ARP/tcpdump 
+                                 saw the device moments ago.
+Ping success always wins (marks online immediately).
+
+- Online + Offline  — probe is additional confirmation; adds active online detection 
+                            on top of passive; offline needs both timeout AND streak (AND) 
+                            or either one (OR). Use for reliable devices.
+- Online only       — probe can only mark online, never offline. Fast recovery when 
+                              device reappears (e.g. phone coming home).
+- Offline only      — probe can only mark offline, never online. Fast offline detection;
+                         passive still handles going online.
+- Confirm offline   — probe only fires after ARP/sniff timeout expires; silent devices 
+                              with infrequent traffic.
+- Ping only         — ICMP only, no TCP fallback; adaptive timing:
+    • online  → ping every 60 s
+    • offline → ping every 15 s (faster recovery detection)
+    • on→off  : only after Offline Threshold expires 
+                      (one failed ping alone is never enough to go offline)
+    • off→on  : immediately on first successful ping
+    Best for routers, cameras, printers and manually-added devices.
+- Not at all        — passive traffic detection only; offline
+    decided purely by ARP/sniff timeout.</Label>
+			</Field>
+
+			<Field id="pingOfflineLogic" type="menu" defaultValue="and">
+				<Label>Offline Trigger Logic</Label>
+				<List>
+					<Option value="and">AND — timeout expired  AND  ping failed  (default, least false-positives)</Option>
+					<Option value="or">OR  — timeout expired  OR   ping failed  (faster offline detection)</Option>
+				</List>
+			</Field>
+
+			<Field id="pingOfflineLogicLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+				<Label>How probe failure and sniff/ARP timeout combine to decide offline (not used in "Online only" or "Not at all" modes).</Label>
+			</Field>
+
+			<Field id="pingMissedCount" type="menu" defaultValue="1">
+				<Label>Missed Pings Before Offline</Label>
+				<List>
+					<Option value="1">1  (first failure counts)</Option>
+					<Option value="2">2</Option>
+					<Option value="3">3</Option>
+					<Option value="4">4</Option>
+					<Option value="5">5</Option>
+				</List>
+			</Field>
+
+			<Field id="pingMissedCountLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+				<Label>Consecutive failed pings needed to trigger offline. Higher values reduce false-offline on transient packet loss.</Label>
 			</Field>
 
 			<Field id="isApOrRouterOverride" type="checkbox" defaultValue="false">
 				<Label>Is AP or Router</Label>
 			</Field>
+
 			<Field id="isApOrRouterOverrideLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 				<Label>Mark this device as an AP or router. IP changes from the sniff thread will be ignored; only the ARP sweep can update its IP. Set automatically when frequent IP changes are detected.</Label>
 			</Field>
@@ -105,6 +161,7 @@ Probe: ICMP ping first; falls back to TCP (80/443/22/8080)
 			<Field id="suppressIpChangeLog" type="checkbox" defaultValue="false">
 				<Label>Suppress IP Change Logging</Label>
 			</Field>
+
 			<Field id="suppressIpChangeLogLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 				<Label>Do not write IP address changes for this device to the log.</Label>
 			</Field>
@@ -112,9 +169,11 @@ Probe: ICMP ping first; falls back to TCP (80/443/22/8080)
 			<Field id="logSeenToFile" type="checkbox" defaultValue="false">
 				<Label>Log Every Seen Event to File</Label>
 			</Field>
+
 			<Field id="logSeenToFileLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 				<Label>Write a debug entry to plugin.log each time this device is seen.</Label>
 			</Field>
+
 		</ConfigUI>
 		<States>
 			<State id="onOffState">
@@ -192,6 +251,71 @@ Probe: ICMP ping first; falls back to TCP (80/443/22/8080)
 				<TriggerLabel>Set Off By Changed</TriggerLabel>
 				<ControlPageLabel>Set Off By</ControlPageLabel>
 			</State>
+			<State id="dhcpHostname">
+				<ValueType>String</ValueType>
+				<TriggerLabel>DHCP Hostname Changed</TriggerLabel>
+				<ControlPageLabel>DHCP Hostname</ControlPageLabel>
+			</State>
+			<State id="mdnsServices">
+				<ValueType>String</ValueType>
+				<TriggerLabel>mDNS Services Changed</TriggerLabel>
+				<ControlPageLabel>mDNS Services</ControlPageLabel>
+			</State>
+			<State id="mdnsModel">
+				<ValueType>String</ValueType>
+				<TriggerLabel>mDNS Model Changed</TriggerLabel>
+				<ControlPageLabel>mDNS Model</ControlPageLabel>
+			</State>
+			<State id="osHint">
+				<ValueType>String</ValueType>
+				<TriggerLabel>OS Hint Changed</TriggerLabel>
+				<ControlPageLabel>OS Hint</ControlPageLabel>
+			</State>
+			<State id="netbiosName">
+				<ValueType>String</ValueType>
+				<TriggerLabel>NetBIOS Name Changed</TriggerLabel>
+				<ControlPageLabel>NetBIOS Name</ControlPageLabel>
+			</State>
+			<State id="deviceType">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Device Type Changed</TriggerLabel>
+				<ControlPageLabel>Device Type</ControlPageLabel>
+			</State>
+			<State id="appleModel">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Apple Model Changed</TriggerLabel>
+				<ControlPageLabel>Apple Model</ControlPageLabel>
+			</State>
+			<State id="osVersion">
+				<ValueType>String</ValueType>
+				<TriggerLabel>OS Version Changed</TriggerLabel>
+				<ControlPageLabel>OS Version</ControlPageLabel>
+			</State>
+			<State id="dhcpOsFingerprint">
+				<ValueType>String</ValueType>
+				<TriggerLabel>DHCP OS Fingerprint Changed</TriggerLabel>
+				<ControlPageLabel>DHCP OS Fingerprint</ControlPageLabel>
+			</State>
+			<State id="networkInterface">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Network Interface Changed</TriggerLabel>
+				<ControlPageLabel>Network Interface</ControlPageLabel>
+			</State>
+			<State id="pingMs">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Ping RTT Changed</TriggerLabel>
+				<ControlPageLabel>Ping RTT</ControlPageLabel>
+			</State>
+			<State id="changeToOn">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Last Went Online</TriggerLabel>
+				<ControlPageLabel>Last Went Online</ControlPageLabel>
+			</State>
+			<State id="changeToOff">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Last Went Offline</TriggerLabel>
+				<ControlPageLabel>Last Went Offline</ControlPageLabel>
+			</State>
 		</States>
 	</Device>
 
@@ -207,6 +331,7 @@ Probe: ICMP ping first; falls back to TCP (80/443/22/8080)
 			<Field id="host" type="textfield" defaultValue="">
 				<Label>Host / IP Address</Label>
 			</Field>
+
 			<Field id="hostLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 				<Label>IP address or hostname to ping (e.g. 192.168.1.1 or www.google.com).
 Checked by ICMP ping only — no MAC tracking, no ARP sweep.</Label>
@@ -231,6 +356,7 @@ Checked by ICMP ping only — no MAC tracking, no ARP sweep.</Label>
 					<Option value="600">10 minutes</Option>
 				</List>
 			</Field>
+
 			<Field id="pingIntervalLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 				<Label>How often to ping this host. Independent of the global scan interval.</Label>
 			</Field>
@@ -245,6 +371,7 @@ Checked by ICMP ping only — no MAC tracking, no ARP sweep.</Label>
 					<Option value="5">5</Option>
 				</List>
 			</Field>
+
 			<Field id="pingMissedCountLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 				<Label>Consecutive failed pings needed to flip the device offline. Higher values reduce false alarms from transient packet loss.</Label>
 			</Field>
@@ -252,9 +379,11 @@ Checked by ICMP ping only — no MAC tracking, no ARP sweep.</Label>
 			<Field id="comment" type="textfield" defaultValue="">
 				<Label>Comment</Label>
 			</Field>
+
 			<Field id="commentLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 				<Label>Free-text note stored as a device state.</Label>
 			</Field>
+
 		</ConfigUI>
 		<States>
 			<State id="onOffState">
@@ -310,26 +439,32 @@ ON when at least one is home
 You can also trigger on "ParticipantsOnline" to check if all are online
 Leave unused slots as "— not used —".</Label>
 			</Field>
+
 			
 			<Field id="watchDevice1" type="menu" >
 				<Label>External Device 1</Label>
 				<List class="self" filter="" method="getExternalDeviceList" />
 			</Field>
+
 			
 			<Field id="watchDevice2" type="menu" >
 				<Label>External Device 2</Label>
 				<List class="self" filter="" method="getExternalDeviceList" />
 			</Field>
+
 			<Field id="watchDevice3" type="menu" >
 				<Label>External Device 3</Label>
 				<List class="self" filter="" method="getExternalDeviceList" />
 			</Field>
+
 			<Field id="watchDevicesLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 				<Label>Fires when one selected device goes offline and all other selected devices are also offline.</Label>
 			</Field>
+
 			<Field id="commentLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 				<Label>Free-text note stored as a device state.</Label>
 			</Field>
+
 		</ConfigUI>
 		<States>
 			<State id="onOffState">
@@ -382,15 +517,23 @@ Leave unused slots as "— not used —".</Label>
 					<Option value="3600">1 hour</Option>
 				</List>
 			</Field>
+
 			<Field id="checkIntervalLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
-				<Label>How often to fetch the public IP address from the internet.</Label>
+				<Label>How often to fetch the public IP address from the internet.
+Services tried in order (first to respond wins):
+  1. api.ipify.org
+  2. checkip.amazonaws.com
+  3. icanhazip.com</Label>
 			</Field>
+
 			<Field id="comment" type="textfield" defaultValue="">
 				<Label>Comment</Label>
 			</Field>
+
 			<Field id="commentLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 				<Label>Free-text note stored as a device state.</Label>
 			</Field>
+
 		</ConfigUI>
 		<States>
 			<State id="onOffState">
@@ -447,36 +590,45 @@ OFF when all are gone.
 You can also trigger on "ParticipantsHome" to check if at least one is home
 Leave unused slots as "— not used —".</Label>
 			</Field>
+
 			<Field id="watchDevice1" type="menu" >
 				<Label>Network Device 1</Label>
 				<List class="self" filter="" method="getNetworkDeviceListForTrigger" />
 			</Field>
+
 			<Field id="watchDevice2" type="menu" >
 				<Label>Network Device 2</Label>
 				<List class="self" filter="" method="getNetworkDeviceListForTrigger" />
 			</Field>
+
 			<Field id="watchDevice3" type="menu" >
 				<Label>Network Device 3</Label>
 				<List class="self" filter="" method="getNetworkDeviceListForTrigger" />
 			</Field>
+
 			<Field id="watchDevice4" type="menu" >
 				<Label>Network Device 4</Label>
 				<List class="self" filter="" method="getNetworkDeviceListForTrigger" />
 			</Field>
+
 			<Field id="watchDevice5" type="menu" >
 				<Label>Network Device 5</Label>
 				<List class="self" filter="" method="getNetworkDeviceListForTrigger" />
 			</Field>
+
 			<Field id="watchDevice6" type="menu" >
 				<Label>Network Device 6</Label>
 				<List class="self" filter="" method="getNetworkDeviceListForTrigger" />
 			</Field>
+
 			<Field id="watchDevicesLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 				<Label>Fires when one selected device comes online and all other selected devices are also online at that moment.</Label>
 			</Field>
+
 			<Field id="commentLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 				<Label>Free-text note stored as a device state.</Label>
 			</Field>
+
 		</ConfigUI>
 		<States>
 			<State id="onOffState">
