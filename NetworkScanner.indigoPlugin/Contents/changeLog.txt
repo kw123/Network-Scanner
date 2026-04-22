@@ -1,7 +1,133 @@
  Network Scanner – Indigo Plugin
 Change Log
 ================================================================================
-Version 2026.5.36 (2026-04-21)
+Version 2026.5.37 (2026-04-22)
+
+1. localName replaced by two separate states (mdnsName + arpHostname):
+     The single localName state oscillated between names sourced from mDNS
+     SRV records and from arp -a output because both sources wrote to the
+     same state on different timescales.  localName is now removed from
+     Devices.xml and replaced by:
+       mdnsName    — populated by the passive sniff thread and dns-sd browse
+                     from mDNS SRV packets (e.g. "iPhone-Karl.local")
+       arpHostname — populated each ARP sweep from the first field of arp -a
+                     output (e.g. "iphone-karl.localdomain")
+     Each state is only updated by its own source, so neither overwrites the
+     other.  The internal local_name/_known field is now used only by the
+     device auto-naming logic and is not exposed as an Indigo state.
+
+2. mdnsServices now accumulates — never shrinks:
+     mDNS browse sees a different subset of services each pass depending on
+     which devices have recently announced.  Previously each browse cycle
+     could replace the existing service list with a shorter one, making
+     mdnsServices oscillate (e.g. "_workstation._tcp" one minute,
+     "_home-assistant._tcp, _workstation._tcp" the next).
+     The state is now a growing set: new services are merged in and existing
+     ones are never removed.
+
+3. NetBIOS / nmblookup removed entirely:
+     nmblookup is not bundled with standard macOS.  The netbiosName state,
+     the nmblookup subprocess call, and all related log messages have been
+     removed.  The netbiosName state has been removed from Devices.xml.
+
+4. Executable path discovery hardened for Indigo daemon environment:
+     Indigo runs as a daemon with a minimal PATH that excludes /sbin and
+     /usr/sbin, so shutil.which("ping") always returned None.
+     _check_executables() now checks the canonical path directly first
+     (os.path.isfile + os.access) and falls back to shutil.which() with an
+     explicit expanded search path (/sbin, /usr/sbin, /bin, /usr/bin,
+     /usr/local/bin, /opt/homebrew/bin, etc.).
+     The resolved path is stored in instance variables (_exe_ping, _exe_arp,
+     _exe_tcpdump, _exe_dns_sd) and used in all subprocess calls — previously
+     the resolved path was only logged, not applied.
+
+5. _DEBUG_PING_ONLY flag added; _DEBUG_FORCE_PING_OK fixed to False:
+     Four ping-only pipeline log messages (verification ping failed, double-
+     check ping confirmed/failed, ARP found real MAC) are now gated on the
+     new _DEBUG_PING_ONLY = False constant at the top of plugin.py.  Set to
+     True to see the full per-IP decision trace.
+     _DEBUG_FORCE_PING_OK was accidentally left True in production; reset to
+     False.
+
+6. passive-info log now shows old value → new value:
+     The log line previously showed identical old and new values because it
+     read "old" from _dev_cache which had already been updated.  Old values
+     are now captured from _known before the update loop runs, so the log
+     correctly shows what changed.
+
+7. pingMs update threshold: 40 % AND > 20 ms (was 30 %):
+     State updates for pingMs are now suppressed unless the RTT change is
+     both more than 40 % relative and more than 20 ms absolute.  This
+     prevents jitter noise (e.g. 5 ms → 7 ms) from triggering state writes
+     while still catching genuine latency shifts.
+
+8. Ping-only candidate "no ARP entry" log removed:
+     The repeated "Ping-only candidate at … no ARP entry — waiting N s"
+     log line has been removed.  All other step logs (ping failed, double-
+     check failed, ARP found real MAC) are still available under
+     _DEBUG_PING_ONLY.
+
+9. Network Devices — Home or Away: Address/Notes columns flipped:
+     Address column now shows participant MAC addresses (space-separated),
+     updated live on every recalc.  Notes column now shows the compact IP
+     summary (e.g. "192.168.1. - 12 15 25"), also updated live.
+     Previously Address showed IPs and Notes showed MACs (written once).
+
+10. Internet Address: publicIp display state and Address column:
+      publicIp uiValue is now "on   203.0.113.42" / "off   203.0.113.42"
+      so status and IP are visible in the device list at a glance.  The
+      state value itself remains the bare IP address for use in triggers
+      and scripts.  pluginProps["address"] is now updated on each successful
+      fetch so the Address column also shows the current public IP.
+
+11. Online/Offline log level fixed to plugin.log only (level 10):
+      The "stateChangeLogLevel" preference (plugin.log only vs. plugin.log +
+      Indigo log) has been removed.  Online/offline state-change messages are
+      now always written at level 10 (plugin.log only).  The corresponding
+      PluginConfig menu field and its default preference entry have been
+      removed.
+
+12. Seen-interval statistics footer aligned with data columns:
+      The "Bins: ≤10s  ≤30s …" footer line was not padded to match the bin
+      columns in the data rows (wrong width, missing :>7 alignment).  The
+      footer label is now padded to exactly the same column offset as the
+      header and each label uses :>7 right-alignment.
+
+================================================================================
+Version 2026.5.35 (2026-04-22)
+1. New device state: previousIps
+     Shows the last 10 IP addresses a device has used, with dates — e.g.
+     "192.168.1.100  (2026-04-20)  |  192.168.1.101  (2026-04-19)".
+     Updated every time a device's IP address changes.  Mirrors the
+     IP-history view available in Unifi and similar controllers.
+
+2. Synthetic device pingMode fixed:
+     pingMode=pingOnly is now set at device-creation time (in _create_indigo_device
+     props dict) instead of via a post-creation replacePluginPropsOnServer call
+     from the wrong thread.  The old code was a no-op because Indigo IPC must
+     run on the main thread.
+
+3. Double-check ping before creating synthetic device:
+     After the first verification ping passes, the plugin waits 1 second then
+     pings once more.  Both must succeed.  A proxy-ARP router answers the first
+     ping but typically fails the second targeted probe, so ghost devices are
+     discarded with a level-20 log message.
+
+4. mDNS deviceType priority fix:
+     apple_model (mDNS TXT am=) now takes precedence over the service map for
+     device-type derivation.  iPhone/iPad/Mac model codes correctly override
+     _airplay._tcp → "Smart Speaker / AV" that was previously applied when
+     those devices also advertise AirPlay Receiver.
+     deviceType is now re-evaluated on every mDNS update (not just first seen).
+
+5. Startup state-file cleanup:
+     Synthetic MAC entries with no live Indigo device are removed entirely.
+     Real MAC entries with a stale device ID have the ID cleared so the device
+     can be recreated correctly on next sweep.
+     Version bump triggers stateListOrDisplayStateIdChanged on existing devices.
+
+================================================================================
+Version 2026.5.34 (2026-04-21)
 1. syntheticDevicesEnabled opt-in gate moved before ping checks:
      When syntheticDevicesEnabled is False the entire thresholds-met block now
      exits immediately with a continue before running /sbin/ping.  Previously

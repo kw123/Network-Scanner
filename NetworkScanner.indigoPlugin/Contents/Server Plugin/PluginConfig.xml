@@ -41,12 +41,12 @@ No extra threads or CPU when off</Label>
 	</Field>
 
 	<Field id="scanInterval" type="menu">
-		<Label>Scan Interval (seconds)</Label>
+		<Label>Scan Interval</Label>
 		<List>
-			<Option value="30">30</Option>
-			<Option value="60">60</Option>
-			<Option value="90">90</Option>
-			<Option value="120">120</Option>
+			<Option value="30">30 seconds</Option>
+			<Option value="60">60 seconds</Option>
+			<Option value="90">90 seconds</Option>
+			<Option value="120">120 seconds</Option>
 		</List>
 	</Field>
 
@@ -79,36 +79,25 @@ No extra threads or CPU when off</Label>
 	</Field>
 
 	<Field id="offlineThreshold" type="menu">
-		<Label>Offline Threshold (seconds)</Label>
+		<Label>Offline Threshold</Label>
 		<List>
-			<Option value="30">30</Option>
-			<Option value="60">60</Option>
-			<Option value="90">90</Option>
-			<Option value="120">120</Option>
-			<Option value="180">180</Option>
-			<Option value="240">240</Option>
-			<Option value="300">300</Option>
-			<Option value="360">360</Option>
-			<Option value="420">420</Option>
+			<Option value="30">30 seconds</Option>
+			<Option value="60">60 seconds</Option>
+			<Option value="90">90 seconds</Option>
+			<Option value="120">2 minutes</Option>
+			<Option value="180">3 minutes</Option>
+			<Option value="240">4 minutes</Option>
+			<Option value="300">5 minutes</Option>
+			<Option value="360">6 minutes</Option>
+			<Option value="420">7 minutes</Option>
+			<Option value="480">8 minutes</Option>
+			<Option value="560">9 minutes</Option>
+			<Option value="600">10 minutes</Option>
 		</List>
 	</Field>
 
 	<Field id="offlineThresholdLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 		<Label>Mark a device offline if not seen for this many seconds, can be overwritten in device edit for each device.</Label>
-	</Field>
-
-	<Field id="startupGracePeriod" type="menu">
-		<Label>Ignore offline changes at startup (seconds)</Label>
-		<List>
-			<Option value="20">20</Option>
-			<Option value="40">40</Option>
-			<Option value="60">60</Option>
-			<Option value="80">80</Option>
-		</List>
-	</Field>
-
-	<Field id="startupGracePeriodLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
-		<Label>Do not mark any device offline for this many seconds after the plugin starts. Gives ARP sniffing time to re-confirm all devices.</Label>
 	</Field>
 
 	<Field id="autoCreateDevices" type="checkbox">
@@ -195,17 +184,6 @@ WARNING: some routers (proxy-ARP) answer ping on behalf of every IP on the subne
 		<Label>Log when a device changes between online and offline.</Label>
 	</Field>
 
-	<Field id="stateChangeLogLevel" type="menu" visibleBindingId="showdebugsection" visibleBindingValue="true">
-		<Label>Online / Offline Log Destination</Label>
-		<List>
-			<Option value="10">plugin.log only</Option>
-			<Option value="20">plugin.log + Indigo log</Option>
-		</List>
-	</Field>
-
-	<Field id="stateChangeLogLevelLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey" visibleBindingId="showdebugsection" visibleBindingValue="true">
-		<Label>Where to write the online/offline message (only used when Log Online / Offline Changes is enabled).</Label>
-	</Field>
 
 	<Field id="debugIpChange" type="checkbox" visibleBindingId="showdebugsection" visibleBindingValue="true">
 		<Label>Log IP Address Changes</Label>

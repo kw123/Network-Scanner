@@ -80,11 +80,24 @@ _SYNTHETIC_MAC_CREATE_INTERVAL = 10   # seconds
 # Set to True to bypass the /sbin/ping verification and force ping_ran=True /
 # ping_ok=True for ALL ping-only candidates.  Lets you test synthetic device
 # creation without needing a real unreachable host.  MUST be False in production.
-_DEBUG_FORCE_PING_OK = True
+_DEBUG_FORCE_PING_OK = False
 
+# Set to True to log every step of the ping-only / synthetic-device pipeline:
+# verification ping result, double-check outcome, ARP re-check, etc.
+# MUST be False in production.
+_DEBUG_PING_ONLY_1 = False
+_DEBUG_PING_ONLY_2 = False
+_DEBUG_PING_ONLY_3 = False
+_DEBUG_PING_ONLY_4 = False
+
+_DEBUG_PASSIVE = False
 # Link-local address prefix bytes (169.254.x.x / RFC 3927 APIPA)
 _LINK_LOCAL_BYTE1 = 0xA9   # 169
 _LINK_LOCAL_BYTE2 = 0xFE   # 254
+
+
+#  before this time  expires no device will be set to off 
+_startupGracePeriod = 45
 
 # ---------------------------------------------------------------------------
 # Plugin config defaults
@@ -98,7 +111,6 @@ kDefaultPluginPrefs = {
 	"sniffEnabled":			True,
 	"mdnsQueryEnabled":		True,
 	"offlineThreshold":		"180",
-	"startupGracePeriod":	"60",
 	"autoCreateDevices":		True,
 	"syntheticDevicesEnabled":	False,
 	"deviceFolder":			"Network Devices",
@@ -112,7 +124,6 @@ kDefaultPluginPrefs = {
 	"showdebugsection":		True,
 	"debugNewDevice":		True,
 	"debugStateChange":		True,
-	"stateChangeLogLevel":	"20",
 	"debugIpChange":		True,
 	"debugSeen":			False,
 	"debugSweep":			False,
@@ -801,13 +812,6 @@ class Plugin(indigo.PluginBase):
 					self._update_indigo_device(mac, entry.get("ip", ""), False,
 					                           source="timeout")
 
-	###----------------------------------------------------------###
-	def _grace_period_secs(self) -> int:
-		"""Return the startup grace period in seconds as a safe integer."""
-		try:
-			return max(0, int(self.pluginPrefs.get("startupGracePeriod", kDefaultPluginPrefs["startupGracePeriod"]) or kDefaultPluginPrefs["startupGracePeriod"]))
-		except (ValueError, TypeError):
-			return 60
 
 	# ------------------------------------------------------------------
 	# Device property/state cache
@@ -976,8 +980,7 @@ class Plugin(indigo.PluginBase):
 					self.indiLOG.log(10, f"Executable '{name}' OK at {found}{note}")
 
 	def startup(self):
-		grace = self._grace_period_secs()
-		self.indiLOG.log(20, f"Network Scanner starting up…  (offline ignore period: {grace} s)")
+		self.indiLOG.log(20, f"Network Scanner starting up…  (offline ignore period: {_startupGracePeriod} s)")
 		self._check_executables()
 		self._startup_time = time.time()
 		self._stop_event.clear()
@@ -1036,7 +1039,8 @@ class Plugin(indigo.PluginBase):
 			"mdns_services":  "mdnsServices",
 			"mdns_model":     "mdnsModel",
 			"os_hint":        "osHint",
-			"local_name":     "localName",    # mDNS SRV hostname
+			"mdns_name":      "mdnsName",     # mDNS SRV hostname
+			"arp_name":       "arpHostname",  # arp -a hostname
 			"device_type":    "deviceType",
 			"apple_model":    "appleModel",   # mDNS TXT am= (e.g. "iPhone15,3")
 			"os_version":     "osVersion",    # mDNS TXT osxvers= (e.g. "21.6.0")
@@ -1082,13 +1086,44 @@ class Plugin(indigo.PluginBase):
 			if entry is None:
 				return
 			dev_id = entry.get("indigo_device_id")
+			old_values = {}   # _known values before this call — used for log
 			for key, val in kwargs.items():
 				if key not in _KEY_TO_STATE:
 					continue
 				val = (val or "").strip()
-				if val and entry.get(key, "") != val:
-					entry[key] = val
-					changed_states[_KEY_TO_STATE[key]] = val
+				if not val:
+					continue
+				old_val = entry.get(key, "")
+				# mdns_services: accumulate — never shrink, only add new service types.
+				# mDNS browse sees different subsets on each pass; replacing the whole
+				# string causes oscillation.  Merge new services into the existing set.
+				if key == "mdns_services" and old_val:
+					existing = {s.strip() for s in old_val.split(",") if s.strip()}
+					incoming = {s.strip() for s in val.split(",")     if s.strip()}
+					merged   = existing | incoming
+					if merged == existing:
+						continue   # nothing new — skip update
+					val = ", ".join(sorted(merged))
+				if old_val == val:
+					continue
+				# pingMs: only update when RTT differs by > 40% AND > 20 ms —
+				# suppresses jitter noise while still catching genuine latency changes.
+				if key == "ping_ms":
+					try:
+						new_ms = float(val.rstrip("ms").strip())
+						old_ms = float(old_val.rstrip("ms").strip()) if old_val else 0.0
+						if old_ms > 0:
+							if abs(new_ms - old_ms) / old_ms < 0.40 or abs(new_ms - old_ms) <= 20:
+								continue   # delta < 40% or ≤ 20 ms — skip update
+					except (ValueError, ZeroDivisionError):
+						pass   # unparseable — fall through and update anyway
+				old_values[_KEY_TO_STATE[key]] = old_val   # snapshot before overwrite
+				entry[key] = val
+				changed_states[_KEY_TO_STATE[key]] = val
+				if key == "mdns_name":
+					# mDNS name also becomes the canonical local_name for device naming
+					entry["local_name"]        = val
+					entry["local_name_source"] = "mdns"
 
 			# Derive deviceType from apple_model and/or mDNS services.
 			# Re-evaluate whenever either field changes so corrections propagate.
@@ -1145,7 +1180,11 @@ class Plugin(indigo.PluginBase):
 				if dev_id in self._dev_cache:
 					self._dev_cache[dev_id]["states"].update(changed_states)
 			if not self.in_grace_period:
-				self.indiLOG.log(10, f"passive-info {mac}: {changed_states}")
+				parts = [
+					f"{k}: {old_values.get(k, '') or '—'}  →  {v}"
+					for k, v in changed_states.items()
+				]
+				if _DEBUG_PASSIVE: self.indiLOG.log(10, f"passive-info {mac}: " + "  |  ".join(parts))
 		except Exception as e:
 			self.indiLOG.log(20, f"_update_passive_info {mac}: {e}")
 
@@ -1156,8 +1195,9 @@ class Plugin(indigo.PluginBase):
 			while True:
 				self.sleep(1)
 				if self.in_grace_period:
-					self.in_grace_period = (time.time() - self._startup_time) < self._grace_period_secs()
-					if not self.in_grace_period:
+					was = self.in_grace_period
+					self.in_grace_period = (time.time() - self._startup_time) < _startupGracePeriod
+					if was and not self.in_grace_period:
 						self.indiLOG.log(20, f"startup finished, offline ignore period ended")
 					
 					
@@ -1951,7 +1991,7 @@ class Plugin(indigo.PluginBase):
 								# Hostname from SRV record: "SRV hostname.local.:port"
 								srv_m = re.search(r'\bSRV\s+([\w\-]+)\.local\.', line)
 								if srv_m:
-									passive["local_name"] = srv_m.group(1)
+									passive["mdns_name"] = srv_m.group(1)
 
 								if is_response:
 									# Service types from PTR records (responses only)
@@ -2743,11 +2783,6 @@ class Plugin(indigo.PluginBase):
 						# First time seeing this IP without ARP — start the counter.
 						first_seen_ts, sweep_count = now, 1
 						self._ping_only_pending[ip] = (first_seen_ts, sweep_count)
-						self.indiLOG.log(10,
-							f"Ping-only candidate at {ip}: no ARP entry — waiting "
-							f"{_PING_ONLY_NEW_DEVICE_DELAY}s / {_PING_ONLY_MIN_SWEEPS} sweeps "
-							f"for passive (tcpdump/ARP) discovery"
-						)
 						continue
 
 					# Both conditions must be met before creating a synthetic device:
@@ -2802,11 +2837,11 @@ class Plugin(indigo.PluginBase):
 					if not ping_ok:
 						# Ping ran but got no response — confirmed ghost.
 						# Delete from pending permanently so it is never retried.
-						del self._ping_only_pending[ip]
-						self.indiLOG.log(10,
-							f"Ping-only candidate at {ip}: verification ping failed — "
-							f"discarding (ghost / proxy-ARP false positive)"
-						)
+						self._ping_only_pending.pop(ip, None)
+						if _DEBUG_PING_ONLY_4:
+							self.indiLOG.log(10,
+								f"Ping-only candidate at {ip}: verification ping failed — discarding (ghost / proxy-ARP false positive)"
+							)
 						continue
 
 					# Step 2b — double-check ping after 1 second.
@@ -2819,7 +2854,7 @@ class Plugin(indigo.PluginBase):
 					ping2_ran = False
 					try:
 						verify2 = subprocess.run(
-							[self._exe_ping, "-c", "1", "-t", "3", "-q", ip],
+							[self._exe_ping, "-c", "1", "-t", "3", ip],
 							stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
 							timeout=6, text=True
 						)
@@ -2835,13 +2870,17 @@ class Plugin(indigo.PluginBase):
 						continue   # binary problem — leave entry pending, retry next sweep
 
 					if not ping2_ok:
-						del self._ping_only_pending[ip]
-						self.indiLOG.log(20,
-							f"Ping-only candidate at {ip}: first ping passed but double-check ping (1 s later) failed — "
-							f"discarding as transient/proxy-ARP false positive  "
-							f"(first ping answered, second did not — suspicious)"
-						)
+						self._ping_only_pending.pop(ip, None)
+						if _DEBUG_PING_ONLY_2:
+							self.indiLOG.log(20,
+								f"Ping-only candidate at {ip}: first ping passed but double-check ping (1 s later) failed — discarding as  transient/proxy-ARP false positive"
+							)
 						continue
+
+					if _DEBUG_PING_ONLY_3:
+						self.indiLOG.log(10,
+							f"Ping-only candidate at {ip}: double-check ping confirmed — {verify2.stdout.strip()}"
+						)
 
 					# Step 3 — final targeted ARP check.
 					# After the ping the kernel may have added an ARP entry.  If a real
@@ -2860,13 +2899,13 @@ class Plugin(indigo.PluginBase):
 					except Exception:
 						pass
 
-					del self._ping_only_pending[ip]
+					self._ping_only_pending.pop(ip, None)
 
 					if real_mac_found and real_mac_found != "ff:ff:ff:ff:ff:ff":
-						self.indiLOG.log(10,
-							f"Ping-only candidate at {ip}: ARP found real MAC {real_mac_found} "
-							f"after verification ping — registering normally"
-						)
+						if _DEBUG_PING_ONLY_1:
+							self.indiLOG.log(10,
+								f"Ping-only candidate at {ip}: ARP found real MAC {real_mac_found} after verification ping — registering normally"
+							)
 						self._register_device(real_mac_found, ip, source="ping-only (no ARP)")
 						continue
 
@@ -3506,9 +3545,34 @@ class Plugin(indigo.PluginBase):
 			except Exception:
 				pass   # states not yet defined — will appear after next plugin restart
 
-		# ── Address column for HOME_AWAY: "192.168.1. - 12 15 25" ─────────────
-		# Built from the last octets of all participants' current IP addresses.
+		# ── Address column for HOME_AWAY: MAC numbers of all participants ───────
 		# Updated whenever recalc runs; only writes pluginProps when the value changes.
+		if typeId == HOME_AWAY and participants:
+			try:
+				macs = []
+				for pid in participants:
+					try:
+						pid_int = int(pid)
+						cached  = self._cache_states(pid_int)
+						mac_val = cached.get("MACNumber", "") if cached else indigo.devices[pid_int].states.get("MACNumber", "")
+						if mac_val:
+							macs.append(mac_val)
+					except Exception:
+						pass
+				desired = "  ".join(macs)
+				current_addr = self._cache_props(dev.id).get("address", "")
+				if desired and desired != current_addr:
+					new_props = dict(props)
+					new_props["address"] = desired
+					dev.replacePluginPropsOnServer(new_props)
+					self._cache_patch_props(dev.id, new_props)   # keep cache in sync
+			except Exception:
+				pass
+
+		# ── Notes (description) for HOME_AWAY: "192.168.1. - 12 15 25" ────────
+		# Built from the last octets of all participants' current IP addresses.
+		# Updated on every recalc so the Notes field always reflects current IPs.
+		# ONLINE devices have watched hosts in Address; their Notes are left to the user.
 		if typeId == HOME_AWAY and participants:
 			try:
 				ips = []
@@ -3522,43 +3586,17 @@ class Plugin(indigo.PluginBase):
 					except Exception:
 						pass
 				if ips:
-					# Find longest common prefix ending with "."
-					parts = [ip.rsplit(".", 1) for ip in ips]
+					parts    = [ip.rsplit(".", 1) for ip in ips]
 					prefixes = [p[0] + "." for p in parts if len(p) == 2]
-					prefix = prefixes[0] if len(set(prefixes)) == 1 else ""
-					octets = " ".join(p[1] for p in parts if len(p) == 2)
-					desired = f"{prefix} - {octets}" if prefix else octets
+					prefix   = prefixes[0] if len(set(prefixes)) == 1 else ""
+					octets   = " ".join(p[1] for p in parts if len(p) == 2)
+					_desc    = f"{prefix} - {octets}" if prefix else octets
 				else:
-					desired = ""
-				current_addr = self._cache_props(dev.id).get("address", "")
-				if desired and desired != current_addr:
-					new_props = dict(props)
-					new_props["address"] = desired
-					dev.replacePluginPropsOnServer(new_props)
-					self._cache_patch_props(dev.id, new_props)   # keep cache in sync
-			except Exception:
-				pass
-
-		# ── Notes (description) — written once only for HOME_AWAY devices.
-		# ONLINE devices already have the watched hosts in the Address column,
-		# so their Notes field is left entirely to the user.
-		# For HOME_AWAY: only write when Notes is still blank so the user can
-		# edit it freely afterwards.
-		if typeId == HOME_AWAY and not self._cache_description(dev.id).strip() and participants:
-			try:
-				labels = []
-				for pid in participants:
-					try:
-						pid_int = int(pid)
-						cached  = self._cache_states(pid_int)
-						mac_val = cached.get("MACNumber", "") if cached else indigo.devices[pid_int].states.get("MACNumber", "")
-						labels.append(mac_val if mac_val else pid)
-					except Exception:
-						labels.append(pid)
-				_desc = ",".join(participants) + " - " + ",".join(labels)
-				dev.description = _desc
-				dev.replaceOnServer()
-				self._cache_set_description(dev.id, _desc)
+					_desc = ""
+				if _desc and _desc != self._cache_description(dev.id).strip():
+					dev.description = _desc
+					dev.replaceOnServer()
+					self._cache_set_description(dev.id, _desc)
 			except Exception as e:
 				if f"{e}".find("None") == -1:
 					self.indiLOG.log(30, f"Could not update notes for {dev.name}: {e}")
@@ -3696,6 +3734,10 @@ class Plugin(indigo.PluginBase):
 
 		state_updates = []
 
+		onoff_str  = "on" if alive else "off"
+		# IP to display: new IP when alive, otherwise last known IP
+		display_ip = ip if (alive and ip) else prev_ip
+
 		# Always stamp the appropriate timestamp regardless of other changes
 		if alive:
 			state_updates.append({"key": "lastSuccessfulUpdate", "value": now})
@@ -3703,21 +3745,26 @@ class Plugin(indigo.PluginBase):
 			state_updates.append({"key": "lastFailedUpdate", "value": now})
 
 		# online/offline flip
-		if alive != was_online:
-			state_updates.append({"key": "onOffState", "value": alive,
-			                      "uiValue": "on" if alive else "off"})
-
 		# IP changed (only meaningful when fetch succeeded)
-		if alive and ip and ip != prev_ip:
+		ip_changed = alive and bool(ip) and ip != prev_ip
+		first_ip   = alive and not prev_ip and bool(ip)
+
+		if ip_changed:
 			if prev_ip:
 				state_updates.append({"key": "previousIp", "value": prev_ip})
-			state_updates.append({"key": "publicIp",   "value": ip})
 			state_updates.append({"key": "lastChanged", "value": now})
 			self.indiLOG.log(20, f"Public IP changed: {prev_ip or '(none)'} → {ip}")
-		elif alive and not prev_ip and ip:
-			# First successful fetch — populate publicIp even if "changed" is vacuous
-			state_updates.append({"key": "publicIp",   "value": ip})
-			state_updates.append({"key": "lastChanged", "value": now})
+
+		# Write onOffState whenever online status or IP changes.
+		# uiValue includes the current IP so the device-list State column shows
+		# "on   203.0.113.42" / "off   203.0.113.42" alongside the on/off icon.
+		if alive != was_online or ip_changed or first_ip:
+			ui = f"{onoff_str}   {display_ip}" if display_ip else onoff_str
+			state_updates.append({"key": "onOffState", "value": alive, "uiValue": ui})
+
+		# publicIp: bare IP value for triggers/scripts; written whenever IP changes.
+		if (ip_changed or first_ip) and display_ip:
+			state_updates.append({"key": "publicIp", "value": display_ip})
 
 		# Fetch live device only now — purely for writing
 		try:
@@ -3727,11 +3774,20 @@ class Plugin(indigo.PluginBase):
 		try:
 			dev.updateStatesOnServer(state_updates)
 			self._cache_patch_states(dev_id, state_updates)
-			# Show current IP in the Notes (description) column for easy reading
-			if alive and ip and self._cache_description(dev_id) != ip:
-				dev.description = ip
-				dev.replaceOnServer()
-				self._cache_set_description(dev_id, ip)
+			# Keep Address column and Notes in sync with the current public IP
+			if alive and ip:
+				props_changed = False
+				new_props = dict(dev.pluginProps)
+				if new_props.get("address", "") != ip:
+					new_props["address"] = ip
+					props_changed = True
+				if props_changed:
+					dev.replacePluginPropsOnServer(new_props)
+					self._cache_patch_props(dev_id, new_props)
+				if self._cache_description(dev_id) != ip:
+					dev.description = ip
+					dev.replaceOnServer()
+					self._cache_set_description(dev_id, ip)
 		except Exception as e:
 			if "None" not in str(e):
 				self.indiLOG.log(30, f"internetAddress update failed for {self._cache_name(dev_id)}: {e}")
@@ -3787,10 +3843,7 @@ class Plugin(indigo.PluginBase):
 			ts     = _now_str()
 			status = "ONLINE" if new_online else "OFFLINE"
 			if self.decideMyLog("StateChange"):
-				lvl = int(self.pluginPrefs.get("stateChangeLogLevel",
-				          kDefaultPluginPrefs["stateChangeLogLevel"]) or
-				          kDefaultPluginPrefs["stateChangeLogLevel"])
-				self.indiLOG.log(lvl, f"{self._cache_name(dev.id)} ({host}) is now {status}")
+				self.indiLOG.log(10, f"{self._cache_name(dev.id)} ({host}) is now {status}")
 			updates += [
 				{"key": "onOffState",     "value": new_online,
 				 "uiValue": f"{'on' if new_online else 'off'}  {_now_str()}"},
@@ -3811,7 +3864,20 @@ class Plugin(indigo.PluginBase):
 
 		ping_str = f"{ms} ms" if ms is not None else ("timeout" if not alive else "")
 		if ping_str and _cached_s.get("pingMs", "") != ping_str:
-			updates.append({"key": "pingMs", "value": ping_str})
+			# Only push pingMs when RTT differs by > 40% AND > 20 ms.
+			_old_ping = _cached_s.get("pingMs", "")
+			_skip = False
+			if ping_str not in ("", "timeout") and _old_ping not in ("", "timeout"):
+				try:
+					_new_ms = float(ping_str.rstrip(" ms"))
+					_old_ms = float(_old_ping.rstrip(" ms"))
+					if _old_ms > 0:
+						if abs(_new_ms - _old_ms) / _old_ms < 0.40 or abs(_new_ms - _old_ms) <= 20:
+							_skip = True
+				except (ValueError, ZeroDivisionError):
+					pass
+			if not _skip:
+				updates.append({"key": "pingMs", "value": ping_str})
 
 		if updates:
 			try:
@@ -3860,9 +3926,15 @@ class Plugin(indigo.PluginBase):
 			entry["ip"] = ip
 			if clear_local_name:                    # proxy-ARP AP: mark and wipe stale client name
 				entry["is_ap_or_router"] = True
-				entry["local_name"]   = ""
-			elif local_name:                        # real name → always store
-				entry["local_name"] = local_name
+				entry["local_name"]        = ""
+				entry["arp_name"]          = ""
+				entry["local_name_source"] = ""
+			elif local_name:
+				entry["arp_name"] = local_name
+				# localName = mDNS name if known, else ARP name
+				if not entry.get("mdns_name"):
+					entry["local_name"]        = local_name
+					entry["local_name_source"] = "arp"
 			if "vendor" not in entry:
 				entry["vendor"] = self.get_vendor(mac)
 			self._known[mac] = entry
@@ -3980,9 +4052,14 @@ class Plugin(indigo.PluginBase):
 			entry["online"]         = True
 			if clear_local_name:                  # proxy-ARP AP: mark and wipe stale client name
 				entry["is_ap_or_router"] = True
-				entry["local_name"]   = ""
-			elif local_name:                      # real name → always store
-				entry["local_name"] = local_name
+				entry["local_name"]        = ""
+				entry["arp_name"]          = ""
+				entry["local_name_source"] = ""
+			elif local_name:
+				entry["arp_name"] = local_name
+				if not entry.get("mdns_name"):
+					entry["local_name"]        = local_name
+					entry["local_name_source"] = "arp"
 			if "vendor" not in entry:
 				entry["vendor"] = self.get_vendor(mac)
 			self._known[mac] = entry
@@ -4236,17 +4313,19 @@ class Plugin(indigo.PluginBase):
 		prev_mac        = cached.get("MACNumber",      "")
 		prev_vendor     = cached.get("hardwareVendor", "")
 		prev_created    = cached.get("created",        "")
-		prev_local_name = cached.get("localName",      "")
-		prev_is_ap      = bool(cached.get("isApOrRouter", False))
+		prev_is_ap       = bool(cached.get("isApOrRouter", False))
+		prev_arp_hostname = cached.get("arpHostname",    "")
 
 		online_changed     = update_online and ((prev_online is None) or (bool(prev_online) != online))
 		ip_changed         = prev_ip     != ip
 		mac_changed        = prev_mac    != mac
 		vendor_changed     = prev_vendor != vendor
 		created_needed     = not prev_created
-		# Update localName when we have a real name, OR when explicitly clearing a stale one
-		local_name_changed = (bool(local_name) and local_name != prev_local_name) \
-		                     or (clear_local_name and bool(prev_local_name))
+		local_name_changed = False   # localName removed as Indigo state; local_name is internal only
+		# arp_name comes in via the local_name parameter when source is arp -a
+		with self._known_lock:
+			arp_name = self._known.get(mac, {}).get("arp_name", "")
+		arp_hostname_changed = bool(arp_name) and arp_name != prev_arp_hostname
 
 		# AP/router auto-detection is done in _register_device (before the throttle).
 		# Here we just pick up whatever is_ap_or_router was passed in / already stored.
@@ -4260,14 +4339,13 @@ class Plugin(indigo.PluginBase):
 		                   and (_now_epoch - self._last_on_msg_ts.get(dev_id, 0) >= 60))
 
 		if not any([online_changed, ip_changed, mac_changed, vendor_changed, created_needed,
-		            local_name_changed, ap_changed, last_on_msg_due]):
+		            local_name_changed, arp_hostname_changed, ap_changed, last_on_msg_due]):
 			return   # nothing to update — zero IPC calls
 
 		dev_name = self._cache_name(dev_id)
 
 		if online_changed and self.decideMyLog("StateChange"):
 			status = "ONLINE" if online else "OFFLINE"
-			lvl    = int(self.pluginPrefs.get("stateChangeLogLevel", kDefaultPluginPrefs["stateChangeLogLevel"]) or kDefaultPluginPrefs["stateChangeLogLevel"])
 			if not online:
 				entry         = self._known.get(mac, {})
 				last_seen_str = entry.get("last_seen_str", "")
@@ -4278,7 +4356,7 @@ class Plugin(indigo.PluginBase):
 			else:
 				suffix  = ""
 				src_str = f"  via {source}" if source else ""
-			self.indiLOG.log(lvl, f"{dev_name} ({ip}) is now {status}{suffix}{src_str}")
+			self.indiLOG.log(10, f"{dev_name} ({ip}) is now {status}{suffix}{src_str}")
 
 		# Detailed trace for any device that matches debugTrackedDevice
 		self._trace_log(mac, ip, "_state_update",
@@ -4314,14 +4392,23 @@ class Plugin(indigo.PluginBase):
 				self._known[mac] = entry
 		if ip_changed:
 			state_updates.append({"key": "ipNumber",   "value": ip})
+			# Build previousIps from ip_history — most-recent first, last 10 entries
+			with self._known_lock:
+				ip_hist = list(self._known.get(mac, {}).get("ip_history", []))
+			if ip_hist:
+				prev_str = "  |  ".join(
+					f"{r['old_ip']}  ({r['ts'][:10]})"
+					for r in reversed(ip_hist[-10:])
+				)
+				state_updates.append({"key": "previousIps", "value": prev_str})
 		if mac_changed:
 			state_updates.append({"key": "MACNumber",  "value": mac})
 		if vendor_changed:
 			state_updates.append({"key": "hardwareVendor",  "value": vendor})
 		if created_needed:
 			state_updates.append({"key": "created",     "value": _now_str()})
-		if local_name_changed:
-			state_updates.append({"key": "localName",   "value": local_name if local_name else ""})
+		if arp_hostname_changed:
+			state_updates.append({"key": "arpHostname", "value": arp_name})
 		if ap_changed:
 			state_updates.append({"key": "isApOrRouter", "value": is_ap_or_router})
 
@@ -4612,9 +4699,12 @@ class Plugin(indigo.PluginBase):
 				for entry in self._known.values():
 					entry.setdefault("history",         [])
 					entry.setdefault("ip_history",      [])
-					entry.setdefault("local_name",      "")
-					entry.setdefault("name",             "")
-					entry.setdefault("curlPort",         None)
+					entry.setdefault("local_name",        "")
+					entry.setdefault("local_name_source", "")   # "mdns" | "arp" | ""
+					entry.setdefault("mdns_name",         "")
+					entry.setdefault("arp_name",          "")
+					entry.setdefault("name",              "")
+					entry.setdefault("curlPort",          None)
 					entry.setdefault("curlUseless",      0)
 					entry.setdefault("curlPingMismatch", 0)
 					entry.setdefault("last_indigo_push",  0)
@@ -4915,9 +5005,11 @@ class Plugin(indigo.PluginBase):
 				lines.append(f"    lastOnOffChange : {states.get('lastOnOffChange', '') or '—'}")
 				lines.append(f"    created         : {states.get('created',         '') or '—'}")
 				lines.append(f"    ipNumber       : {states.get('ipNumber',        '') or '—'}")
+				lines.append(f"    previousIps    : {states.get('previousIps',     '') or '—'}")
 				lines.append(f"    MACNumber      : {states.get('MACNumber',       '') or '—'}")
 				lines.append(f"    hardwareVendor  : {states.get('hardwareVendor',     '') or '—'}")
-				lines.append(f"    localName       : {states.get('localName',        '') or '—'}")
+				lines.append(f"    mdnsName        : {states.get('mdnsName',         '') or '—'}")
+				lines.append(f"    arpHostname     : {states.get('arpHostname',      '') or '—'}")
 				lines.append(f"    dhcpHostname    : {states.get('dhcpHostname',     '') or '—'}")
 				lines.append(f"    mdnsServices    : {states.get('mdnsServices',     '') or '—'}")
 				lines.append(f"    mdnsModel       : {states.get('mdnsModel',        '') or '—'}")
@@ -4980,7 +5072,8 @@ class Plugin(indigo.PluginBase):
 	def listEmptyStates(self, valuesDict=None, *args):
 		"""Menu: list state names that are empty in every networkDevice."""
 		_ALL_STATES = [
-			"MACNumber", "ipNumber", "hardwareVendor", "localName",
+			"MACNumber", "ipNumber", "previousIps", "hardwareVendor",
+			"mdnsName", "arpHostname",
 			"dhcpHostname", "dhcpOsFingerprint",
 			"mdnsServices", "mdnsModel", "deviceType", "appleModel", "osVersion",
 			"osHint", "networkInterface",
@@ -5629,7 +5722,12 @@ class Plugin(indigo.PluginBase):
 
 		out += "\n"+sep
 		out += "\n"
-		out +=		"Bins: " + "  ".join(f"{_SEEN_LABEL[b]}" for b in _SEEN_BINS)
+		# Align the "Bins:" footer label with the first bin column in the data rows.
+		# Data columns before bins: W_NAME+1 + W_IP+1 + 3+1 + W_PING + 19+1 + 8+1 + 7+2
+		_bins_col_offset = W_NAME + 1 + W_IP + 1 + 3 + 1 + W_PING + 19 + 1 + 8 + 1 + 7 + 2
+		_bins_label      = "Bins: "
+		out +=		_bins_label + " " * (_bins_col_offset - len(_bins_label))
+		out +=		"  ".join(f"{_SEEN_LABEL[b]:>7}" for b in _SEEN_BINS)
 		out +=		"   (counts = number of sightings within that gap)"
 		
 		out += "\n"+sep
@@ -6097,10 +6195,11 @@ class Plugin(indigo.PluginBase):
 			mac = dev.states.get("MACNumber", "").lower()
 			if mac:
 				_state_to_known = {
-					"ipNumber":    "ip",
-					"localName":    "local_name",
-					"hardwareVendor":   "vendor",
-					"isApOrRouter": "is_ap_or_router",
+					"ipNumber":      "ip",
+					"mdnsName":      "mdns_name",
+					"arpHostname":   "arp_name",
+					"hardwareVendor": "vendor",
+					"isApOrRouter":  "is_ap_or_router",
 				}
 				known_key = _state_to_known.get(state_name)
 				if known_key:
