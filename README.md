@@ -349,22 +349,21 @@ indigo.server.sendEmailTo("your email address", subject=theSubject, body=theBody
 
 - **Force Immediate Rescan** — Triggers an ARP sweep + ping check immediately.
 - **Ping a Device (IP or DNS)…** — Enter any IP address or DNS name, click PING. Result is logged and written to `networkScanner_pingDevice` as `{ip} {ms}ms on/off`.
-- **Add Internet Ping Devices…** — Select from Google, Yahoo, Microsoft, CNN, AT&T, Siemens, or enter a custom hostname (e.g. `www.welt.de`). Creates External Device entries for each selected host — device name is `Ping-{host}` with `www.` stripped. Safe to run multiple times — skips any host that already exists. Also auto-creates a **Ping-NetworkScanner Internet** aggregate device as an internet up/down indicator. This dialog also contains an **Add Internet Address device** button.
-- **Scan Open Ports on All Online Devices…** — Port-scans all online devices; stores results in `openPorts` state.
+- **Add Internet Ping Devices…** — Select from Google, Yahoo, Microsoft, CNN, Siemens, SAP, Indigodomo, or enter a custom hostname. Creates External Device entries for each selected host — device name is `Ping-{host}`. Safe to run multiple times — skips any host that already exists. Also contains an **Add Internet Address device** button.
+- **Perform Broad Port Scan on All Online Devices…** — TCP connect scan of all 25 known ports on every online device. Menu-triggered run is verbose: every device shown with all ports found; newly discovered ports marked `++++ new ++++`. Also runs automatically once per night after 02:00 in quiet mode — only devices with newly discovered ports are printed, plus `no new ports found` if nothing changed.
 - **Set a State of Device…** — Manually overwrite any state on any plugin device.
 - **Print tools…** — Combined reporting dialog:
   - *All discovered devices* — Prints all known MACs with IP, local name, vendor, on/off and last-seen to plugin.log.
   - *Devices grouped by OS / ports / type* — Groups networkDevices by `osHint`, `osVersion`, `dhcpOsFingerprint`, `deviceType`, `networkInterface`, and open port. Only populated buckets are shown.
   - *Devices with IP address changes* — Lists devices whose IP address has changed since the plugin started.
-  - *Devices with empty states* — Lists all enrichment state names that are empty across every networkDevice — quick check of which data sources have not yet populated any devices.
+  - *Devices with empty states* — Lists all enrichment state names that are empty across every networkDevice.
   - *Instability report* — Lists devices with very short on/off intervals (configurable cutoff: 1–8 minutes).
   - *Seen-interval statistics* — Histogram of how often each device is seen; sort by IP / name / last seen.
   - *Reset seen-interval counters* — Clears histogram counters for all devices.
 - **Manage Ignored MAC Addresses…** — Exclude / re-include specific MACs from scanning.
-- **Import Names from Fingscan** — Reads all Fingscan `IP-Device` entries, matches them to NetworkScanner devices by MAC address, and writes the Fingscan device name into the `fingscanDeviceInfo` state. Logs each matched pair.
-- **Overwrite Device Names with Fingscan Names** — Uses the imported `fingscanDeviceInfo` values to rename each NetworkScanner device to `{fingscan-name}-NET_`. Only renames devices where `fingscanDeviceInfo` is non-empty.
-- **Compare Fingscan ↔ NetworkScanner** — Prints a side-by-side report showing: devices in Fingscan only, devices in NetworkScanner only, and devices in both with a conflicting online/offline state.
-- **Help…** — Prints full help text to plugin.log.
+- **Track Device / Logging Tools…** — Per-device debug trace by MAC or IP. Logs every tcpdump line, ARP hit, ping probe and state change for listed devices. Also contains a button to turn off all per-device logging at once.
+- **Help…** — Prints a short plugin summary (device types, all menu items) followed by the full README to plugin.log.
+- **Fingscan Migration Tools…** — See *Fingscan Migration* section below.
 
 ---
 
@@ -461,7 +460,7 @@ Four tools under *Plugins → Network Scanner → Fingscan Migration Tools…*:
 - **(2) Overwrite Names** — Uses the imported `fingscanDeviceInfo` values to rename each NetworkScanner device to `{fingscan-name}-{prefix}` (e.g. `Karl iPhone-Net`). Only renames devices where `fingscanDeviceInfo` is non-empty.
 - **(3) Copy New — COPY NEW button** — Finds Fingscan devices whose MAC has no match in NetworkScanner and creates a new `networkDevice` for each one:
   - `pingMode = "pingOnly"`, device starts **disabled** — enable each one manually to begin monitoring
-  - Name format: `{fingscan-name}-{prefix}` (e.g. `Karl iPhone-Net`)
+  - Name format: `{fingscan-name}-{prefix}-ping-only` (e.g. `Karl iPhone-Net-ping-only`)
   - MAC, IP, and vendor are seeded from Fingscan
   - **Skipped automatically** (shown in log): devices with no IP, IP `0.0.0.0`, or a non-private (public/internet) IP address — add those as External Devices instead. Private ranges accepted: `10.x.x.x`, `172.16–31.x.x`, `192.168.x.x`
 

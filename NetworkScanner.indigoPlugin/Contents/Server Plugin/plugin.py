@@ -172,25 +172,46 @@ _SCAN_PORTS = {
 	53:    ("DNS",        "Domain Name System — name resolution"),
 	80:    ("HTTP",       "Web server — unencrypted"),
 	110:   ("POP3",       "Mail retrieval — Post Office Protocol"),
+	123:   ("NTP",        "Network Time Protocol — clock synchronisation (primarily UDP; TCP open indicates NTP daemon)"),
 	143:   ("IMAP",       "Mail retrieval — IMAP"),
+	161:   ("SNMP",       "Simple Network Management Protocol — monitoring (primarily UDP; TCP open indicates SNMPv3)"),
+	162:   ("SNMP-trap",  "SNMP trap receiver — network event alerts (primarily UDP)"),
+	389:   ("LDAP",       "Lightweight Directory Access Protocol — directory services"),
 	443:   ("HTTPS",      "Web server — TLS encrypted"),
 	445:   ("SMB",        "Windows / Samba file sharing"),
 	548:   ("AFP",        "Apple Filing Protocol — macOS file sharing"),
 	554:   ("RTSP",       "Real-Time Streaming Protocol — cameras / media"),
 	587:   ("SMTP-sub",   "Mail submission — encrypted outgoing mail"),
 	631:   ("IPP",        "Internet Printing Protocol — network printer"),
+	636:   ("LDAPS",      "LDAP over SSL — encrypted directory services"),
+	989:   ("FTPS-data",  "FTP over SSL — data channel"),
+	990:   ("FTPS",       "FTP over SSL — control channel"),
 	993:   ("IMAPS",      "IMAP over SSL"),
 	995:   ("POP3S",      "POP3 over SSL"),
+	1400:  ("Sonos",      "Sonos speaker control / UPnP"),
 	1883:  ("MQTT",       "IoT messaging broker (unencrypted)"),
 	3306:  ("MySQL",      "MySQL / MariaDB database"),
 	3389:  ("RDP",        "Windows Remote Desktop Protocol"),
 	5000:  ("UPnP/Dev",   "UPnP control point or development server"),
+	5432:  ("PostgreSQL", "PostgreSQL database"),
 	5900:  ("VNC",        "VNC screen sharing / remote desktop"),
 	8080:  ("HTTP-alt",   "Alternate HTTP — proxy or dev server"),
+	8123:  ("HomeAssist", "Home Assistant web interface"),
 	8443:  ("HTTPS-alt",  "Alternate HTTPS"),
 	9100:  ("Printer",    "Raw printing — HP JetDirect / direct TCP print"),
 	32400: ("Plex",       "Plex Media Server"),
+	32469: ("Plex-DLNA",  "Plex DLNA server"),
 }
+
+# Ports tried as a last-resort fallback when all _CURL_PORTS_DEFAULT attempts fail.
+# Derived from _SCAN_PORTS minus the four ports already in _CURL_PORTS_DEFAULT so
+# there is no redundancy with the fast four-port routine probe.
+_CURL_PORTS_BROAD = tuple(p for p in _SCAN_PORTS if p not in set(_CURL_PORTS_DEFAULT))
+
+# Broad-scan rate limits — applied per device via curlBroadLastTime in _known.
+_BROAD_SCAN_STARTUP_DELAY =  600    # seconds after startup before the first broad scan (10 min)
+_BROAD_SCAN_INTERVAL      = 86400   # minimum seconds between automatic broad scans per device (24 h)
+_BROAD_SCAN_HOUR_MIN      =  2      # automatic broad scan only runs at or after this hour (02:00)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -349,11 +370,14 @@ def _ping_extended(ip: str, timeout: float = 1.0) -> tuple:
 
 
 def _curl_check(ip: str, preferred_port: int = None, timeout: float = 0.5,
-                rst_counts_alive: bool = True) -> int | None:
+                rst_counts_alive: bool = True, ports: tuple = None) -> int | None:
 	"""TCP-connect probe: try common ports and return the first responding port, or None.
 
 	Uses a raw Python socket — no subprocess overhead.
 	preferred_port is tried first (last port that worked for this device).
+
+	ports (default None → _CURL_PORTS_DEFAULT):
+	  Override the port list.  Pass _CURL_PORTS_BROAD for a last-resort wide scan.
 
 	rst_counts_alive (default True):
 	  True  – ConnectionRefusedError (TCP RST) counts as alive.  Use for periodic
@@ -369,9 +393,10 @@ def _curl_check(ip: str, preferred_port: int = None, timeout: float = 0.5,
 	                                 rst_counts_alive=False → skip (router may have sent RST)
 	  socket.timeout / OSError    → no response on this port   → try next
 	"""
-	# Try preferred_port first (last port that worked), then the standard list minus that port
-	ports = ((preferred_port,) + tuple(p for p in _CURL_PORTS_DEFAULT if p != preferred_port)
-	         if preferred_port else _CURL_PORTS_DEFAULT)
+	_ports = ports if ports is not None else _CURL_PORTS_DEFAULT
+	# Try preferred_port first (last port that worked), then the chosen list minus that port
+	ports = ((preferred_port,) + tuple(p for p in _ports if p != preferred_port)
+	         if preferred_port else _ports)
 	for port in ports:
 		s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 		try:
@@ -682,6 +707,7 @@ class Plugin(indigo.PluginBase):
 		self._ping_only_pending:          dict  = {}
 		self._last_synthetic_created_at:  float = 0.0   # rate-limit: max 1 synthetic MAC per _SYNTHETIC_MAC_CREATE_INTERVAL
 		self._sbin_ping_missing_logged:   bool  = False  # log missing ping only once per session
+		self._nightly_broad_scan_last:    float = 0.0   # timestamp of last automatic nightly broad scan
 		# Offline requests queued by background threads (e.g. ghost removal) for
 		# the main Indigo thread (runConcurrentThread) to process via IPC.
 		# Each entry: (dev_id, mac, ip, source)
@@ -2643,6 +2669,20 @@ class Plugin(indigo.PluginBase):
 			self._check_external_devices()
 			self._save_state()
 
+			# Nightly automatic broad port scan — once per day, only after 02:00.
+			# Runs in its own thread (quiet mode: only devices with new ports are logged).
+			_now_ts = time.time()
+			if (
+				datetime.datetime.now().hour >= _BROAD_SCAN_HOUR_MIN
+				and (_now_ts - self._nightly_broad_scan_last) >= _BROAD_SCAN_INTERVAL
+			):
+				self._nightly_broad_scan_last = _now_ts
+				threading.Thread(
+					target=self._broad_port_scan_worker,
+					kwargs={"quiet": True},
+					daemon=True, name="NS-BroadScanNight",
+				).start()
+
 			# Between ARP sweeps, run _check_all_devices every
 			# _PING_ONLY_INTERVAL_OFFLINE seconds so that pingOnly / ping-enabled
 			# devices are probed on their own schedule (60 s online, 15 s offline)
@@ -3459,12 +3499,43 @@ class Plugin(indigo.PluginBase):
 						confirm_ok = False
 						detail     = "TCP=no-response(port-known,offline)"
 					else:
-						# TCP has genuinely never worked for this device (no open ports).
-						# Second ICMP is the only fallback; accept the proxy-ARP limitation
-						# for pure IoT devices — those should use pingOnly or none mode.
-						time.sleep(1.0)
-						confirm_ok = _ping(ip)
-						detail     = f"2nd-ICMP={'ok' if confirm_ok else 'FAIL'}"
+						# TCP has never worked on the four default ports for this device.
+						# Before falling back to a second ICMP ping (which proxy-ARP can
+						# fake), try the broader port list — catches devices that only
+						# expose unusual ports (RTSP camera, printer, RDP, etc.).
+						# Rate-limited: not within _BROAD_SCAN_STARTUP_DELAY of startup,
+						# at most once per _BROAD_SCAN_INTERVAL seconds per device,
+						# and only after _BROAD_SCAN_HOUR_MIN (02:00) to avoid noisy night scans.
+						_broad_due = (
+							(time.time() - self._startup_time)                >= _BROAD_SCAN_STARTUP_DELAY
+							and (time.time() - entry.get("curlBroadLastTime", 0)) >= _BROAD_SCAN_INTERVAL
+							and datetime.datetime.now().hour                  >= _BROAD_SCAN_HOUR_MIN
+						)
+						if _broad_due:
+							broad_port = _curl_check(ip, ports=_CURL_PORTS_BROAD,
+							                         rst_counts_alive=False)
+							with self._known_lock:
+								_eb = self._known.setdefault(mac, {})
+								_eb["curlBroadLastTime"] = time.time()   # stamp regardless of result
+							if broad_port is not None:
+								confirm_ok = True
+								detail     = f"TCP-broad=port {broad_port}"
+								with self._known_lock:
+									_eb = self._known.setdefault(mac, {})
+									_eb["curlPort"]    = broad_port
+									_eb["curlUseless"] = 0
+							else:
+								# Broad scan also failed — second ICMP is the last resort.
+								# Accept the proxy-ARP limitation; pure IoT devices with no
+								# open ports should use pingOnly or none mode.
+								time.sleep(1.0)
+								confirm_ok = _ping(ip)
+								detail     = f"2nd-ICMP={'ok' if confirm_ok else 'FAIL'}"
+						else:
+							# Broad scan not yet due — fall straight to second ICMP.
+							time.sleep(1.0)
+							confirm_ok = _ping(ip)
+							detail     = f"2nd-ICMP={'ok' if confirm_ok else 'FAIL'}"
 					if log_ping:
 						self.indiLOG.log(10,
 							f"ping  {dev_name} ({ip})  offline-reconfirm [{detail}] "
@@ -3500,10 +3571,37 @@ class Plugin(indigo.PluginBase):
 				self.indiLOG.log(10,
 					f"probe {dev_name} ({ip})  {'ok port ' + str(port) if port else 'fail all ports'}"
 				)
+			new_useless = 0 if port is not None else (entry.get("curlUseless", 0) + 1)
+			# Last-resort: before curlUseless hits the limit (which would permanently
+			# suspend TCP for this device), try the full _SCAN_PORTS list.
+			# Catches devices that only expose unusual ports (e.g. 554 RTSP camera,
+			# 9100 printer, 3389 RDP).
+			# Rate-limited: not before _BROAD_SCAN_STARTUP_DELAY seconds after startup,
+			# at most once per _BROAD_SCAN_INTERVAL seconds per device,
+			# and only after _BROAD_SCAN_HOUR_MIN (02:00).
+			_broad_due = (
+				port is None
+				and new_useless >= _CURL_USELESS_LIMIT
+				and (time.time() - self._startup_time)                >= _BROAD_SCAN_STARTUP_DELAY
+				and (time.time() - entry.get("curlBroadLastTime", 0)) >= _BROAD_SCAN_INTERVAL
+				and datetime.datetime.now().hour                      >= _BROAD_SCAN_HOUR_MIN
+			)
+			if _broad_due:
+				broad_port = _curl_check(ip, ports=_CURL_PORTS_BROAD)
+				if log_ping:
+					self.indiLOG.log(10,
+						f"probe {dev_name} ({ip})  broad-scan  "
+						f"{'ok port ' + str(broad_port) if broad_port else 'fail all ports'}"
+					)
+				if broad_port is not None:
+					port        = broad_port
+					new_useless = 0
 			with self._known_lock:
 				e = self._known.setdefault(mac, {})
 				e["curlPort"]    = port
-				e["curlUseless"] = 0 if port is not None else (entry.get("curlUseless", 0) + 1)
+				e["curlUseless"] = new_useless
+				if _broad_due:
+					e["curlBroadLastTime"] = time.time()   # stamp regardless of result
 				if port is not None:
 					# ping failed but TCP succeeded — could be a router answering on behalf
 					# of the device (e.g. Draytek proxy-TCP). Track consecutive mismatches.
@@ -6540,68 +6638,88 @@ class Plugin(indigo.PluginBase):
 
 	###----------------------------------------------------------###
 	def helpPlugin(self):
-		"""Menu: read README.md and print it to plugin.log as plain text."""
-		import re as _re
-		readme = self._readme_path
-		try:
-			with open(readme, encoding="utf-8") as _f:
-				raw = _f.read()
-			lines   = []
-			in_code = False
-			for line in raw.splitlines():
-				# toggle fenced code blocks — keep content, strip the fence markers
-				if line.startswith("```"):
-					in_code = not in_code
-					if in_code:
-						lines.append("")   # blank line before code
-					continue
-				if in_code:
-					lines.append("  " + line)  # indent code lines
-					continue
-				# strip Markdown heading markers  (## Foo → FOO  /  # Bar → BAR)
-				m = _re.match(r"^(#{1,6})\s+(.*)", line)
-				if m:
-					depth = len(m.group(1))
-					text  = m.group(2).strip()
-					if depth == 1:
-						lines.append("=" * 72)
-						lines.append(text.upper())
-						lines.append("=" * 72)
-					elif depth == 2:
-						lines.append("")
-						lines.append("── " + text + " " + "─" * max(0, 68 - len(text)))
-					else:
-						lines.append("")
-						lines.append(text)
-					continue
-				# strip horizontal rules
-				if _re.match(r"^---+$", line.strip()):
-					continue
-				# strip inline code backticks, bold/italic markers
-				line = _re.sub(r"`([^`]+)`", r"\1", line)
-				line = _re.sub(r"\*\*([^*]+)\*\*", r"\1", line)
-				line = _re.sub(r"\*([^*]+)\*",   r"\1", line)
-				# convert Markdown table rows  | a | b | c |  →  a  b  c
-				if line.startswith("|"):
-					cells = [c.strip() for c in line.strip("|").split("|")]
-					# skip separator rows  |---|---|
-					if all(_re.match(r"^[-: ]+$", c) for c in cells if c):
-						continue
-					line = "  " + "   ".join(c for c in cells if c)
-				lines.append(line)
-			# Print one log entry per section so Indigo never truncates a large block
-			section = []
-			for ln in lines:
-				if ln.startswith("──") and section:
-					self.indiLOG.log(20, "\n".join(section))
-					section = [ln]
-				else:
-					section.append(ln)
-			if section:
-				self.indiLOG.log(20, "\n".join(section))
-			self.indiLOG.log(20, f"For a properly formatted version open:\n{readme}")
-		except Exception as e:
-			self.indiLOG.log(30, f"Could not read README.md: {e}")
+		"""Menu: print a short plugin summary and the path to README.md."""
+		_SUMMARY = """\
+================================================================
+Network Scanner — Indigo Plugin  (com.karlwachs.networkscanner)
+================================================================
+
+WHAT IT DOES
+Discovers all devices on the local LAN by ARP sweep, passive tcpdump
+sniffing (ARP / mDNS / DHCP), and active ICMP / TCP probing.
+Creates one Indigo device per unique MAC address and keeps its on/off
+state current.  Enriches devices with hostname, vendor, OS hint, open
+ports, mDNS model and services.
+
+
+DEVICE TYPES
+  networkDevice             One per discovered MAC.  Tracks online/offline,
+                            IP, vendor, hostname, ping ms, open ports.
+
+  externalDevice            User-defined internet host (e.g. google.com).
+                            Monitored by ICMP ping on a fixed interval.
+
+  internetAddress           Monitors the public WAN IP of this machine.
+                            Alerts when the IP changes.
+
+  Network Devices —         Aggregate: ON when >= 1 of up to 6 networkDevices
+  Home or Away              is online, OFF when all are offline.
+                            Optional off-delay (0-180 s) to absorb brief drops.
+
+  External Devices —        Aggregate: ON when >= 1 of up to 3 externalDevices
+  Online / Offline          is reachable.  Use as internet up/down indicator.
+
+
+MENU ITEMS  (Plugins -> Network Scanner)
+  Force Immediate Rescan    Trigger ARP sweep + probe cycle now.
+
+  Ping a Device             One-off ICMP ping to any IP or hostname.
+                            Result written to networkScanner_pingDevice.
+
+  Add Internet Ping         Create externalDevices for common providers
+  Devices                   (Google, Yahoo, Microsoft, etc.) and optionally
+                            an Internet Address device.  Safe to repeat.
+
+  Perform Broad Port Scan   TCP connect scan of all 36 known ports on every
+                            online device.  Menu run = verbose (every device
+                            shown with all ports found, new ports marked
+                            ++++ new ++++).  Also runs automatically once
+                            per night after 02:00 in quiet mode — only
+                            devices with newly discovered ports are logged.
+
+  Slow Port Scan            Probes all 1 001 TCP ports (0-1 000) on one
+  (0-1000) on One Device    selected device at <= 2 ports/second.  Runs in
+                            the background (~8-17 min).  Progress logged
+                            every 100 ports; final report lists all open
+                            ports and merges them into openPorts state.
+
+  Set a State of Device     Manually overwrite any state on any plugin
+                            device (debug / repair tool).
+
+  Manage Ignored MACs       Add / remove MACs from the ignore list so
+                            unwanted devices are never auto-created.
+
+  Print Tools               Reports to log: all devices, devices grouped
+                            by OS / ports / type, IP address changes,
+                            unused states, instability report,
+                            seen-interval statistics.
+
+  Track Device /            Per-device debug trace by MAC or IP.  Logs
+  Logging Tools             every tcpdump line, ARP hit, ping probe and
+                            state change for listed devices.
+
+  Help                      Print this summary and full README to log.
+
+  Fingscan Migration        Migrate devices from the Fingscan plugin:
+  Tools                     (0) Compare Fingscan vs NetworkScanner by MAC.
+                            (1) Import Fingscan names into fingscanDeviceInfo.
+                            (2) Rename matched devices to fingscanName-prefix.
+                            (3) Create networkDevices for Fingscan-only MACs
+                                (ping-only, disabled, LAN addresses only).
+================================================================
+"""
+		self.indiLOG.log(20, _SUMMARY)
+		self.indiLOG.log(20, f"Full documentation (README):\n{self._readme_path}")
 
 	# ------------------------------------------------------------------
 	# Per-device port scanning
@@ -6644,8 +6762,7 @@ class Plugin(indigo.PluginBase):
 		"""Port-scan one device, update openPorts state, and fix device name with vendor."""
 		if self._stop_event.is_set() or not ip:
 			return
-		open_p   = self._scan_ports_one(ip)
-		port_str = ", ".join(f"{p}/{_SCAN_PORTS[p][0]}" for p in open_p) if open_p else ""
+		open_p = self._scan_ports_one(ip)
 		try:
 			# Resolve the live device — dev_id may be stale if the device was deleted
 			# and recreated (e.g. by the ARP scanner) while the port scan was running.
@@ -6672,110 +6789,320 @@ class Plugin(indigo.PluginBase):
 			mac        = dev.states.get("MACNumber", "")
 			vendor     = dev.states.get("hardwareVendor", "")
 			local_name = self._known.get(mac.lower(), {}).get("local_name", "") if mac else ""
-			# Update openPorts state
+			# Merge new scan results with existing openPorts state (cumulative).
+			# Ports discovered in previous scans are never removed — they accumulate
+			# so that ports only open occasionally are not silently lost.
+			existing_raw = (dev.states.get("openPorts", "") or "").strip()
+			prev_ports: set = set()
+			for _item in existing_raw.split(","):
+				_item = _item.strip()
+				if _item:
+					try:
+						prev_ports.add(int(_item.split("/")[0]))
+					except ValueError:
+						pass
+			merged_ports = sorted(prev_ports | set(open_p))
+			port_str = ", ".join(
+				f"{p}/{_SCAN_PORTS[p][0]}" for p in merged_ports if p in _SCAN_PORTS
+			) if merged_ports else ""
 			dev.updateStateOnServer("openPorts", value=port_str)
 		except Exception as e:
 			if f"{e}".find("None") == -1:
 				self.indiLOG.log(30, f"Port scan update failed for device {dev_id}: {e}")
 
 	###----------------------------------------------------------###
-	def scanOpenPorts(self):
-		"""Menu: launch TCP port scan on all online devices in a background thread."""
-		t = threading.Thread(target=self._port_scan_worker, daemon=True, name="NS-PortScan")
+	def performBroadPortScan(self):
+		"""Menu: run _CURL_PORTS_BROAD on all online devices, bypassing the daily rate limit.
+		Verbose mode: every device is shown with its ports (=== header).
+		"""
+		t = threading.Thread(target=self._broad_port_scan_worker,
+		                     kwargs={"quiet": False},
+		                     daemon=True, name="NS-BroadScan")
 		t.start()
 
 	###----------------------------------------------------------###
-	def _port_scan_worker(self):
-		"""Scan _SCAN_PORTS on every online known device and print a formatted report."""
+	def _broad_port_scan_worker(self, quiet: bool = False):
+		"""Probe _CURL_PORTS_BROAD on every online known device.
+
+		quiet=False (menu-triggered): verbose — every device shown with === header.
+		quiet=True  (nightly auto):   silent  — only prints header + devices where
+		            NEW ports were discovered; "no new ports found" if none.
+		"""
 		scan_start = time.time()
 
 		with self._known_lock:
-			snapshot = dict(self._known)
+			snapshot = {mac: dict(e) for mac, e in self._known.items()}
 
-		# Collect online devices, sorted by IP address
 		targets = sorted(
 			[
-				(entry.get("ip", ""), mac, entry.get("vendor", "Unknown"))
-				for mac, entry in snapshot.items()
-				if entry.get("online") and entry.get("ip")
+				(e.get("ip", ""), mac, e.get("vendor", "Unknown"),
+				 e.get("curlPort"), e.get("curlUseless", 0),
+				 e.get("indigo_device_id"))
+				for mac, e in snapshot.items()
+				if e.get("online") and e.get("ip")
 			],
 			key=lambda x: [int(o) for o in x[0].split(".") if o.isdigit()]
 		)
 
 		if not targets:
-			self.indiLOG.log(20, "Port scan: no online devices to scan.")
+			self.indiLOG.log(20, "Broad port scan: no online devices — nothing to scan.")
 			return
 
+		# Both menu and nightly scan all known ports; nightly only reports new ones
+		_ports_to_scan = _SCAN_PORTS
+
+		if not quiet:
+			self.indiLOG.log(20,
+				f"Broad port scan starting — {len(targets)} online device(s), "
+				f"{len(_ports_to_scan)} ports each…"
+			)
+
+		W        = 72
+		sep      = "─" * W
+		# quiet mode: accumulates (dev_num, dev_name, ip, vendor, new_ports) — only devices with genuinely new ports
+		new_devs = []
+		dev_num  = 0
+
+		for ip, mac, vendor, prev_curl_port, prev_useless, dev_id in targets:
+			dev_num += 1
+			if self._stop_event.is_set():
+				break
+
+			# ── Read the device's current openPorts state for comparison ─────
+			prev_open_set: set = set()
+			if dev_id:
+				try:
+					_dev = indigo.devices[dev_id]
+					_raw = (_dev.states.get("openPorts", "") or "").strip()
+					for _item in _raw.split(","):
+						_item = _item.strip()
+						if _item:
+							try:
+								prev_open_set.add(int(_item.split("/")[0]))
+							except ValueError:
+								pass
+				except Exception:
+					pass
+
+			# ── Probe all broad ports in parallel threads ────────────────────
+			found   = []
+			f_lock  = threading.Lock()
+			threads = []
+
+			def _probe(p, _ip=ip):
+				try:
+					s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+					s.settimeout(0.5)
+					if s.connect_ex((_ip, p)) == 0:
+						with f_lock:
+							found.append(p)
+					s.close()
+				except Exception:
+					pass
+
+			for port in _ports_to_scan:
+				t2 = threading.Thread(target=_probe, args=(port,), daemon=True)
+				t2.start()
+				threads.append(t2)
+
+			deadline = time.time() + 3
+			for t2 in threads:
+				t2.join(timeout=max(deadline - time.time(), 0))
+
+			found_sorted = sorted(found)
+			now          = time.time()
+			dev_name     = snapshot.get(mac, {}).get("name", mac)
+
+			# Ports that are genuinely new (not already in openPorts state)
+			new_ports    = [p for p in found_sorted if p not in prev_open_set]
+
+			# Best port for curlPort: first new port, then first found, else keep previous
+			best_port   = new_ports[0] if new_ports else (found_sorted[0] if found_sorted else None)
+			new_useless = 0 if best_port is not None else prev_useless
+
+			# Always stamp curlBroadLastTime; update curlPort / curlUseless when improved
+			with self._known_lock:
+				e = self._known.setdefault(mac, {})
+				e["curlBroadLastTime"] = now
+				if best_port is not None:
+					e["curlPort"]    = best_port
+					e["curlUseless"] = 0
+				elif prev_curl_port is None:
+					e["curlUseless"] = new_useless
+
+			# ── Log result for this device ───────────────────────────────────
+			if quiet:
+				# Collect only devices that have at least one genuinely new port
+				if new_ports:
+					new_devs.append((dev_num, dev_name, ip, vendor, new_ports))
+			else:
+				# Verbose: print every device
+				self.indiLOG.log(20, "")
+				self.indiLOG.log(20, f"=== {dev_num:3d} === {dev_name}  ({ip})  {vendor}")
+				if found_sorted:
+					for p in found_sorted:
+						svc     = _SCAN_PORTS[p][0] if p in _SCAN_PORTS else "?"
+						desc    = _SCAN_PORTS[p][1] if p in _SCAN_PORTS else ""
+						new_tag = "  ++++ new ++++" if p in new_ports else ""
+						self.indiLOG.log(20, f"    {p:<7} {svc:<12} {desc}{new_tag}")
+				else:
+					self.indiLOG.log(20, f"    (no ports responded)")
+
+		elapsed = time.time() - scan_start
+
+		if quiet:
+			# ── Quiet (nightly) report — only header + devices with new ports ─
+			self.indiLOG.log(20, f"Port Scan Results — {_now_str()}")
+			if new_devs:
+				for dev_num, dev_name, ip, vendor, new_ports in new_devs:
+					self.indiLOG.log(20, "")
+					self.indiLOG.log(20, f"=== {dev_num:3d} === {dev_name}  ({ip})  {vendor}")
+					for p in new_ports:
+						svc  = _SCAN_PORTS[p][0] if p in _SCAN_PORTS else "?"
+						desc = _SCAN_PORTS[p][1] if p in _SCAN_PORTS else ""
+						self.indiLOG.log(20, f"    {p:<7} {svc:<12} {desc}  ++++ new ++++")
+			else:
+				self.indiLOG.log(20, "  no new ports found")
+		else:
+			# ── Verbose (menu) summary ────────────────────────────────────────
+			self.indiLOG.log(20, sep)
+			self.indiLOG.log(20,
+				f"  Broad port scan complete: {len(targets)} device(s)  •  {elapsed:.1f} s"
+			)
+
+	###----------------------------------------------------------###
+	def startSlowPortScan(self, valuesDict, typeId=""):
+		"""Menu button: validate selection and launch the background slow port scan."""
+		dev_id_str = valuesDict.get("devId", "0")
+		try:
+			dev_id = int(dev_id_str)
+			dev    = indigo.devices[dev_id]
+		except Exception:
+			valuesDict["slowScanMsg"] = "⚠  No device selected — pick one from the list."
+			return valuesDict
+
+		ip = dev.states.get("ipNumber", "").strip()
+		if not ip:
+			valuesDict["slowScanMsg"] = f"⚠  {dev.name} has no IP address — cannot scan."
+			return valuesDict
+
+		thread_name = f"NS-SlowScan-{dev_id}"
+		for t in threading.enumerate():
+			if t.name == thread_name and t.is_alive():
+				valuesDict["slowScanMsg"] = f"⚠  Scan already running for {dev.name} — wait for it to finish."
+				return valuesDict
+
+		valuesDict["slowScanMsg"] = (
+			f"▶  Scan started for {dev.name} ({ip})  —  1 001 ports at ≤ 2/s."
+			f"  Results in log in ~8–17 min."
+		)
+		threading.Thread(
+			target=self._slow_port_scan_worker,
+			args=(dev_id, ip, dev.name),
+			daemon=True,
+			name=thread_name,
+		).start()
+		return valuesDict
+
+	###----------------------------------------------------------###
+	def _slow_port_scan_worker(self, dev_id: int, ip: str, dev_name: str):
+		"""Probe all TCP ports 0–1000 on one device at ≤ 2 ports/second.
+
+		Sequential — each port gets a 0.5 s connect timeout; a 0.5 s pause is added
+		after each probe so the device is never hammered faster than 2 probes/second.
+		Total run time: ~8 min (all ports respond quickly) to ~17 min (all time out).
+		Progress is logged every 100 ports.  Final report lists all open ports and
+		merges them cumulatively into the device's openPorts state.
+		"""
+		PORT_START = 0
+		PORT_END   = 1000
+		RATE_DELAY = 0.5   # seconds between probe *starts* (≤ 2 probes/second)
+		TIMEOUT    = 0.5   # socket connect timeout in seconds
+
+		total = PORT_END - PORT_START + 1
+		found: list = []
+
 		self.indiLOG.log(20,
-			f"Port scan starting — {len(targets)} online device(s), "
-			f"{len(_SCAN_PORTS)} ports each…"
+			f"Slow port scan started: {dev_name} ({ip})"
+			f"  •  ports {PORT_START}–{PORT_END}  ({total} ports)"
+			f"  •  ≤ 2 ports/s  •  est. 8–17 min"
 		)
 
-		# Probe all (ip, port) pairs in parallel threads (I/O-bound, 0.5 s timeout each)
-		open_ports   = {ip: [] for ip, _, _ in targets}
-		results_lock = threading.Lock()
+		for port in range(PORT_START, PORT_END + 1):
+			if self._stop_event.is_set():
+				self.indiLOG.log(20,
+					f"Slow port scan aborted (plugin stopping): {dev_name} ({ip})"
+				)
+				return
 
-		def _probe(ip, port):
+			probe_start = time.time()
 			try:
-				sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-				sock.settimeout(0.5)
-				if sock.connect_ex((ip, port)) == 0:
-					with results_lock:
-						open_ports[ip].append(port)
-				sock.close()
+				s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+				s.settimeout(TIMEOUT)
+				if s.connect_ex((ip, port)) == 0:
+					found.append(port)
+				s.close()
 			except Exception:
 				pass
 
-		threads = []
-		for ip, _mac, _vendor in targets:
-			for port in _SCAN_PORTS:
-				if self._stop_event.is_set():
-					return
-				t = threading.Thread(target=_probe, args=(ip, port), daemon=True)
-				t.start()
-				threads.append(t)
+			# Progress log every 100 ports
+			if port > PORT_START and port % 100 == 0:
+				pct       = (port - PORT_START + 1) / total * 100
+				found_str = ", ".join(str(p) for p in found) if found else "none"
+				self.indiLOG.log(20,
+					f"  Slow scan {dev_name}: port {port}/{PORT_END}"
+					f"  ({pct:.0f}%)  open so far: {found_str}"
+				)
 
-		# Wait for all probes (hard ceiling: 0.5 s timeout + 2 s slack)
-		deadline = time.time() + 3
-		for t in threads:
-			remaining = deadline - time.time()
-			if remaining <= 0:
-				break
-			t.join(timeout=max(remaining, 0))
+			# Rate-limit: wait out the remainder of the 0.5 s window
+			elapsed = time.time() - probe_start
+			wait    = RATE_DELAY - elapsed
+			if wait > 0:
+				time.sleep(wait)
 
-		elapsed    = time.time() - scan_start
-		total_open = sum(len(v) for v in open_ports.values())
-
-		# ── Format report ──────────────────────────────────────────────────
-		W    = 72
-		sep  = "─" * W
-		sep2 = "═" * W
-
+		# ── Final report ──────────────────────────────────────────────────
+		W   = 72
+		sep = "─" * W
 		self.indiLOG.log(20, "")
-		self.indiLOG.log(20, f"  Port Scan Results — {_now_str()}")
-		self.indiLOG.log(20, sep2)
-
-		for ip, mac, vendor in targets:
-			ports    = sorted(open_ports.get(ip, []))
-			dev_name = _mac_to_device_name(mac, prefixName = self._getPrefixName())
-			self.indiLOG.log(20, f"  {dev_name}   {_ip_for_notes(ip)}   {vendor}")
-
-			if ports:
-				self.indiLOG.log(20, f"  {'Port':<7} {'Service':<12} Description")
-				self.indiLOG.log(20, "  " + "─" * 58)
-				for port in ports:
-					svc, desc = _SCAN_PORTS[port]
-					self.indiLOG.log(20, f"  {port:<7} {svc:<12} {desc}")
-			else:
-				self.indiLOG.log(20, "  (no open ports found in scanned range)")
-			self.indiLOG.log(20, "")
-
 		self.indiLOG.log(20, sep)
 		self.indiLOG.log(20,
-			f"  Scan complete: {len(targets)} device(s)  •  "
-			f"{total_open} open port(s) found  •  {elapsed:.1f} s"
+			f"Slow Port Scan Results — {dev_name} ({ip})  •  {_now_str()}"
 		)
-		self.indiLOG.log(20, "")
+		self.indiLOG.log(20, f"  Scanned ports {PORT_START}–{PORT_END}  ({total} ports)")
+		if found:
+			self.indiLOG.log(20, f"  {len(found)} open port(s) found:")
+			for p in found:
+				svc  = _SCAN_PORTS[p][0] if p in _SCAN_PORTS else "?"
+				desc = _SCAN_PORTS[p][1] if p in _SCAN_PORTS else ""
+				self.indiLOG.log(20, f"    {p:<7} {svc:<12} {desc}")
+		else:
+			self.indiLOG.log(20, f"  no open ports found in range {PORT_START}–{PORT_END}")
+		self.indiLOG.log(20, sep)
+
+		# Merge open ports cumulatively into the device's openPorts state
+		if found:
+			try:
+				dev  = indigo.devices[dev_id]
+				_raw = (dev.states.get("openPorts", "") or "").strip()
+				prev: set = set()
+				for _item in _raw.split(","):
+					_item = _item.strip()
+					if _item:
+						try:
+							prev.add(int(_item.split("/")[0]))
+						except ValueError:
+							pass
+				merged   = sorted(prev | set(found))
+				port_str = ", ".join(
+					f"{p}/{(_SCAN_PORTS[p][0] if p in _SCAN_PORTS else '?')}"
+					for p in merged
+				)
+				dev.updateStateOnServer("openPorts", value=port_str)
+			except Exception as e:
+				if "None" not in str(e):
+					self.indiLOG.log(30,
+						f"Slow scan: openPorts update failed for {dev_name}: {e}"
+					)
 
 	###----------------------------------------------------------###
 	def getNetworkDeviceList(self, filter="", valuesDict=None, typeId="", targetId=0):

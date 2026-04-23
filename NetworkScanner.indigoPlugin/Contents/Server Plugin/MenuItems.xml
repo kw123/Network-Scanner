@@ -129,9 +129,9 @@ Result is written to the log and to variable networkScanner_pingDevice (on / off
 		</ConfigUI>
 	</MenuItem>
 
-	<MenuItem id="scanOpenPorts">
-		<Name>Scan Open Ports on All Online Devices ...</Name>
-		<CallbackMethod>scanOpenPorts</CallbackMethod>
+	<MenuItem id="performBroadPortScan">
+		<Name>Perform Broad Port Scan on All Online Devices ...</Name>
+		<CallbackMethod>performBroadPortScan</CallbackMethod>
 	</MenuItem>
 
 	<MenuItem id="setDevState">
@@ -341,6 +341,32 @@ Result is written to the log and to variable networkScanner_pingDevice (on / off
 		<CallbackMethod>helpPlugin</CallbackMethod>
 	</MenuItem>
 	
+	<MenuItem id="slowPortScan">
+		<Name>Slow Port Scan (0–1000) on One Device ...</Name>
+		<ConfigUI>
+			<Field id="slowScanWarning" type="label" fontColor="orange">
+				<Label>Probes all 1 001 TCP ports (0–1 000) on one device at ≤ 2 ports/second.
+Runs in the background — takes approximately 8 to 17 minutes.
+Results and progress are printed to the Indigo log.</Label>
+			</Field>
+
+			<Field id="devId" type="menu" defaultValue="0">
+				<Label>Select device:</Label>
+				<List class="self" filter="all" method="filterNetworkAllDevices" dynamicReload="true"/>
+			</Field>
+
+			<Field id="startSlowScan" type="button">
+				<Label> </Label>
+				<Title>▶ START SLOW SCAN</Title>
+				<CallbackMethod>startSlowPortScan</CallbackMethod>
+			</Field>
+
+			<Field id="slowScanMsg" type="textfield" readonly="true" defaultValue="— select a device, then click ▶ START SLOW SCAN —">
+				<Label>Status</Label>
+			</Field>
+		</ConfigUI>
+	</MenuItem>
+
 	<MenuItem id="importFromFingscan">
 		<Name>Fingscan Migration Tools...</Name>
 		<ConfigUI>

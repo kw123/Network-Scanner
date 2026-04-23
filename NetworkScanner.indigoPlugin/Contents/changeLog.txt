@@ -1,6 +1,118 @@
  Network Scanner – Indigo Plugin
 Change Log
 ================================================================================
+Version 2026.5.51 (2026-04-23)
+
+1. Port scan — 8 new ports added to _SCAN_PORTS (now 36 ports total):
+     123   NTP          Network Time Protocol — clock synchronisation
+     161   SNMP         Simple Network Management Protocol — monitoring
+     162   SNMP-trap    SNMP trap receiver — network event alerts
+     389   LDAP         Lightweight Directory Access Protocol — directory services
+     636   LDAPS        LDAP over SSL — encrypted directory services
+     989   FTPS-data    FTP over SSL — data channel
+     990   FTPS         FTP over SSL — control channel
+     5432  PostgreSQL   PostgreSQL database
+   Note: NTP (123) and SNMP (161/162) are primarily UDP services; a TCP hit
+   on these ports indicates the daemon also listens on TCP (NTP time transfer,
+   SNMPv3 TCP transport).
+   Already present (unchanged): 587, 993, 995, 8080.
+
+================================================================================
+Version 2026.5.50 (2026-04-23)
+
+1. New menu item — "Slow Port Scan (0–1000) on One Device …":
+     Probes all 1 001 TCP ports (0–1 000) on a single selected device.
+     Sequential scan at ≤ 2 ports/second (0.5 s connect timeout + 0.5 s pause
+     between probes) so the device is never hammered.
+     Runs entirely in the background (NS-SlowScan-<devId> daemon thread);
+     the menu dialog returns immediately with a status message.
+     Progress is logged to Indigo log every 100 ports (port N / 1000, % done,
+     open ports found so far).
+     Final report lists every open port with service name and description.
+     Open ports are merged cumulatively into the device's openPorts state
+     (existing ports are never removed).
+     Guard: if a scan is already running for the same device the button is a
+     no-op and shows a warning.
+     Estimated run time: 8–17 minutes (device response time dependent).
+
+================================================================================
+Version 2026.5.49 (2026-04-23)
+
+1. Port scan — three new ports added to _SCAN_PORTS (now 28 ports total):
+     1400  Sonos        — Sonos speaker control / UPnP
+     8123  HomeAssist   — Home Assistant web interface
+     32469 Plex-DLNA    — Plex DLNA server
+   (port 32400 Plex HTTP was already present)
+
+================================================================================
+Version 2026.5.48 (2026-04-23)
+
+1. Port scanning — consolidated into single "Perform Broad Port Scan" menu item:
+     "Scan Open Ports" menu item and _port_scan_worker removed.
+     "Perform Broad Port Scan" is now the sole port scanning entry point.
+     Scans all 25 _SCAN_PORTS on every online device.
+     Menu-triggered (verbose): every device shown with === N === header,
+     all found ports listed one per line, new ports marked "++++ new ++++".
+     Nightly automatic (quiet, after 02:00, once per 24 h): prints only
+     "Port Scan Results — timestamp" and devices where new ports were
+     found; prints "no new ports found" if nothing changed.
+     New-port detection compares against the device's actual openPorts
+     state, not just the stored curlPort value.
+
+2. Help menu — now prints plugin summary before README:
+     Clicking Help prints a concise plain-text summary of all device
+     types and menu items first, then the full README content.
+
+================================================================================
+Version 2026.5.47 (2026-04-23)
+
+1. Nightly broad scan — correct "new port" detection:
+     Previously "new" was determined by comparing the first found port against
+     curlPort only, which could miss additional new ports or produce false
+     positives.  Now the broad scan reads the device's actual openPorts state
+     at the start of each probe and computes:
+       new_ports = found_ports − already_known_ports
+     In quiet (nightly) mode a device is printed ONLY if new_ports is
+     non-empty; only the new ports are listed (all marked ← NEW).
+     Devices where broad scan found ports that were already in openPorts are
+     silently skipped.
+     Verbose (menu) mode is unchanged — every device shown, ← NEW tags on
+     ports not previously in openPorts.
+
+================================================================================
+Version 2026.5.46 (2026-04-23)
+
+1. Broad port scan — two output modes and automatic nightly run:
+     Menu-triggered scan (verbose): every device shown with === header,
+     all ports listed, ← NEW tag on newly-discovered ports, summary line.
+
+     Automatic nightly scan (quiet): fires once per day at or after 02:00
+     from the scan loop.  Prints only:
+       "Port Scan Results — YYYY-MM-DD HH:MM:SS"
+       === DeviceName  (IP)  Vendor        ← only devices with NEW ports
+           port  service  description  ← NEW
+       "  no new ports found"             ← if nothing changed
+     Devices where no new port was found are silently skipped.
+
+================================================================================
+Version 2026.5.45 (2026-04-23)
+
+1. Broad port scan — menu item and revised schedule:
+     New menu item: Plugins → Network Scanner → Perform Broad Port Scan on All
+     Online Devices.  Probes _CURL_PORTS_BROAD (all _SCAN_PORTS minus the four
+     default TCP probe ports) on every currently-online device immediately,
+     bypassing the daily rate limit.  For each device logs:
+       "broad-scan  DeviceName (192.168.1.x)  ports found: 554/RTSP  80/HTTP ← NEW"
+     or "(no ports responded)".  Updates curlPort and resets curlUseless to 0
+     when a new port is found; always stamps curlBroadLastTime so the automatic
+     nightly scan does not repeat the work until tomorrow.
+
+     Automatic broad scan schedule changed:
+       Before: once per hour (_BROAD_SCAN_INTERVAL = 3 600 s), any time of day
+       After:  once per day  (_BROAD_SCAN_INTERVAL = 86 400 s), only at or after
+               02:00 (_BROAD_SCAN_HOUR_MIN = 2) to avoid noisy early-morning scans.
+
+================================================================================
 Version 2026.5.44 (2026-04-23)
 
 1. Fingscan Migration Tools — Copy New Devices (step 3):
