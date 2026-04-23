@@ -11,28 +11,6 @@
 		<Name>Network Device</Name>
 		<ConfigUI>
 
-			<Field id="offlineThreshold" type="menu" defaultValue="0">
-				<Label>Offline Threshold (seconds)</Label>
-				<List>
-					<Option value="0">0  (use plugin default)</Option>
-					<Option value="60">1 minute</Option>
-					<Option value="90">1 1/2 minutes</Option>
-					<Option value="120">2 minutes</Option>
-					<Option value="180">3 minutes</Option>
-					<Option value="240">4 minutes</Option>
-					<Option value="300">5 minutes</Option>
-					<Option value="360">6 minutes</Option>
-					<Option value="420">7 minutes</Option>
-					<Option value="480">8 minutes</Option>
-					<Option value="540">9 minutes</Option>
-					<Option value="600">10 minutes</Option>
-				</List>
-			</Field>
-
-			<Field id="offlineThresholdLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
-				<Label>Mark offline if not seen for this many seconds. 0 = use the plugin-wide default.</Label>
-			</Field>
-
 			<Field id="comment" type="textfield" defaultValue="">
 				<Label>Comment</Label>
 			</Field>
@@ -148,6 +126,64 @@ Ping success always wins (marks online immediately).
 
 			<Field id="pingMissedCountLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 				<Label>Consecutive failed pings needed to trigger offline. Higher values reduce false-offline on transient packet loss.</Label>
+			</Field>
+
+			<Field id="offlineCheckInterval" type="menu" defaultValue="0">
+				<Label>Offline Check Interval</Label>
+				<List>
+					<Option value="0">Use scan interval (default)</Option>
+					<Option value="10">10 seconds</Option>
+					<Option value="15">15 seconds</Option>
+					<Option value="20">20 seconds</Option>
+					<Option value="30">30 seconds</Option>
+					<Option value="60">1 minute</Option>
+					<Option value="120">2 minutes</Option>
+					<Option value="300">5 minutes</Option>
+				</List>
+			</Field>
+
+			<Field id="offlineCheckIntervalLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+				<Label>How often to probe an offline device to detect recovery. Only applies when ping is enabled (any mode except "Not at all"). 0 = use the global Scan Interval. Smaller values catch recovery faster at the cost of more pings.</Label>
+			</Field>
+
+			<Field id="onlineCheckInterval" type="menu" defaultValue="0">
+				<Label>Online Ping Interval</Label>
+				<List>
+					<Option value="0">Use default (60 s / scan interval)</Option>
+					<Option value="30">30 seconds</Option>
+					<Option value="60">1 minute</Option>
+					<Option value="90">1.5 minutes</Option>
+					<Option value="120">2 minutes</Option>
+					<Option value="180">3 minutes</Option>
+					<Option value="300">5 minutes</Option>
+					<Option value="600">10 minutes</Option>
+				</List>
+			</Field>
+
+			<Field id="onlineCheckIntervalLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+				<Label>How often to ping an online device. In Ping Only mode the default is 60 s; in other ping modes the default is the global Scan Interval. Recommended: set to 30–50% of the Offline Threshold so the device is confirmed at least twice before it can time out. Example: Offline Threshold = 3 min → set this to 60–90 s.</Label>
+			</Field>
+
+			<Field id="offlineThreshold" type="menu" defaultValue="0">
+				<Label>Offline Threshold</Label>
+				<List>
+					<Option value="0">0  (use plugin default)</Option>
+					<Option value="60">1 minute</Option>
+					<Option value="90">1 1/2 minutes</Option>
+					<Option value="120">2 minutes</Option>
+					<Option value="180">3 minutes</Option>
+					<Option value="240">4 minutes</Option>
+					<Option value="300">5 minutes</Option>
+					<Option value="360">6 minutes</Option>
+					<Option value="420">7 minutes</Option>
+					<Option value="480">8 minutes</Option>
+					<Option value="540">9 minutes</Option>
+					<Option value="600">10 minutes</Option>
+				</List>
+			</Field>
+
+			<Field id="offlineThresholdLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+				<Label>Mark offline if not seen for this many seconds. 0 = use the plugin-wide default. In Ping only mode this is the sole condition that controls on→off (one failed ping is never enough by itself).</Label>
 			</Field>
 
 			<Field id="isApOrRouterOverride" type="checkbox" defaultValue="false">
@@ -628,6 +664,24 @@ Leave unused slots as "— not used —".</Label>
 
 			<Field id="watchDevicesLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 				<Label>Fires when one selected device comes online and all other selected devices are also online at that moment.</Label>
+			</Field>
+
+			<Field id="offDelay" type="menu" defaultValue="0">
+				<Label>Delay before OFF</Label>
+				<List>
+					<Option value="0">Immediately</Option>
+					<Option value="10">10 seconds</Option>
+					<Option value="20">20 seconds</Option>
+					<Option value="30">30 seconds</Option>
+					<Option value="60">1 minute</Option>
+					<Option value="90">90 seconds</Option>
+					<Option value="120">2 minutes</Option>
+					<Option value="180">3 minutes</Option>
+				</List>
+			</Field>
+
+			<Field id="offDelayLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+				<Label>When all participants go offline, wait this long before setting the device to OFF. If any participant comes back online during the delay, the OFF transition is cancelled.</Label>
 			</Field>
 
 			<Field id="commentLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">

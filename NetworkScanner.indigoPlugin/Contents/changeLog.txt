@@ -1,6 +1,192 @@
  Network Scanner – Indigo Plugin
 Change Log
 ================================================================================
+Version 2026.5.44 (2026-04-23)
+
+1. Fingscan Migration Tools — Copy New Devices (step 3):
+     New "COPY NEW" button in Plugins → Network Scanner → Fingscan Migration Tools.
+     Scans all Fingscan IP-Device entries, finds MACs that have no matching
+     networkDevice in Network Scanner, and creates one networkDevice for each.
+     Each imported device is created with:
+       - pingMode = "pingOnly" (active ICMP probe, no passive ARP dependency)
+       - Device enabled = OFF (disabled in Indigo)
+     A log line is written for every device:
+       "xxx was added as ping-only, but is in DISABLED mode.
+        Enable it in Indigo to start monitoring."
+     Device name: "{fingscan-name}-{prefix}" (e.g. "Karl iPhone-Net").
+     MAC, IP, and vendor are seeded from the Fingscan source device where
+     available.  Devices already present in Network Scanner (matched by MAC)
+     are silently skipped.  A summary is printed at the end.
+
+     Skipped automatically (logged but not imported):
+       - Devices with no IP or IP 0.0.0.0
+       - Devices with a non-private IP address (public/internet hosts — use an
+         External Device for those instead); private ranges accepted:
+         10.x.x.x, 172.16–31.x.x, 192.168.x.x
+
+================================================================================
+Version 2026.5.43 (2026-04-22)
+
+1. Home/Away aggregate — configurable OFF delay:
+     New "Delay before OFF" option in the Network Devices — Home or Away device
+     editor (0 / 10 / 20 / 30 / 60 / 90 / 120 / 180 seconds).
+     When all participants go offline the device does NOT immediately flip to OFF;
+     instead an internal countdown starts.  If any participant comes back online
+     before the delay expires the countdown is cancelled and the device stays ON.
+     Once the delay expires with all participants still offline, the device
+     switches to OFF normally.
+     Default is 0 (off immediately, matching previous behaviour).
+     Purpose: absorbs transient disconnects (e.g. brief WiFi drops, proxy-ARP
+     timing, phone screen-off) so that short absences do not trigger Away
+     automations.
+
+================================================================================
+Version 2026.5.42 (2026-04-22)
+
+1. Proxy-ARP false-positive fix for pingOnly mode:
+     Many WiFi routers (e.g. UniFi) answer ICMP on behalf of recently-
+     disconnected clients.  The ARP sweep resets last_seen via these proxy-ARP
+     replies, so the offline threshold based on last_seen never expired —
+     the device stayed online even with WiFi off.
+     Fixed by tracking a new per-device timestamp ping_only_last_ping_ok that
+     is updated only when the dedicated ICMP probe itself succeeds — never by
+     the ARP sweep.  The offline threshold for pingOnly devices is now measured
+     against ping_only_last_ping_ok instead of last_seen.
+     At startup, online pingOnly devices have ping_only_last_ping_ok set to now
+     (fresh baseline) so a stale JSON timestamp does not cause an immediate
+     offline decision.  _load_state also resets the field to 0 on every
+     restart so old-format JSON files are handled cleanly.
+
+2. Proxy-ARP false-positive fix for confirm mode:
+     a) Secondary TCP probe skipped after was_offline confirmation:
+        After the offline-reconfirmation TCP check failed (correct), the code
+        fell through to a secondary TCP probe that incremented curlUseless on
+        every offline cycle.  Once curlUseless hit _CURL_USELESS_LIMIT the
+        confirmation fallback switched to a second ICMP ping — which proxy-ARP
+        answered, sending the device back online.
+        Fixed by returning False immediately after was_offline confirmation,
+        preventing the secondary TCP probe from running (and inflating
+        curlUseless) when the device is genuinely offline.
+     b) curlUseless limit + known port → stay offline:
+        When curlUseless reaches the limit but curlPort is set (TCP has worked
+        before), the confirmation no longer falls back to a second ICMP ping.
+        TCP failure is taken as confirmation of offline instead.  Second ICMP
+        fallback is kept only for devices where TCP has genuinely never worked
+        (curlPort = None, i.e. pure IoT / no open ports).
+     c) curlUseless reset to 0 when device goes offline:
+        Ensures that the next offline→online cycle always starts with a TCP
+        confirmation attempt rather than immediately hitting the useless limit.
+
+3. Device config cache fix (pingMode not updating without plugin reload):
+     closedDeviceConfigUi was calling _cache_put(dev) where dev.pluginProps
+     still held the pre-save values — Indigo writes the new props only after
+     closedDeviceConfigUi returns.  Changing pingMode in the device editor
+     therefore had no effect until the plugin was reloaded.
+     Fixed: cache is now updated directly from valuesDict (the dialog values
+     that will become the new props) in both the hot-path (device already
+     cached) and the cold-path (device not yet cached).
+
+4. Home/Away aggregate Address column — compact IP format:
+     When Flip Address / Notes is ON, the Address column for networkDevicesHomeAway
+     devices now shows a compressed form when all participants share the same /24
+     subnet: "192.168.1. 112 22 44" instead of full padded IPs.
+     Falls back to space-separated full IPs when participants span different subnets.
+     The Notes column already used this format; the Address column now matches.
+
+================================================================================
+Version 2026.5.41 (2026-04-22)
+
+1. Per-device Online Ping Interval (new device setting):
+     New "Online Ping Interval" menu in the Network Device edit dialog.
+     Options: 0 (default: 60 s in Ping only mode, scan interval in other
+     modes), 30 s, 60 s, 90 s, 120 s, 180 s, 300 s, 600 s.
+     Controls how often a device that is already online is actively pinged,
+     independently of the global scan interval.  For Ping only mode this
+     replaces the fixed 60 s constant; for other active ping modes (confirm,
+     both, online, offline) a separate online_check_next_probe timer gates
+     mid-cycle calls.  Label suggests setting this to 30–50 % of the Offline
+     Threshold so the device is confirmed at least twice before it can time out.
+
+2. pingOnly probe schedule now independent of scan interval:
+     _scan_loop previously called _check_all_devices once per scan interval
+     (e.g. every 2 min).  pingOnly devices' 60 s / 15 s adaptive timer could
+     never fire more often than the scan interval, so a 90 s offline threshold
+     would time out before the next ping confirmation.  Fixed: _scan_loop now
+     calls _check_all_devices every _PING_ONLY_INTERVAL_OFFLINE (15 s) between
+     ARP sweeps.  Per-device ping_only_next_probe gates prevent redundant work
+     for devices not yet due; the sweep-freshness skip prevents re-probing
+     ARP-visible devices too.
+
+3. Sweep-freshness skip revised for pingOnly devices:
+     pingOnly devices are now excluded from the ARP-based sweep-freshness check
+     (their last_seen is set by ping, not ARP, so the ARP window was blocking
+     the ping_only_next_probe timer).  A narrow coincidence guard replaces it:
+     if the ARP sweep pinged the same IP within the last _SWEEP_FRESHNESS_MARGIN
+     (10 s), the dedicated pingOnly probe is skipped for that cycle and the
+     next_probe timer is pushed forward — preventing the double-ping that
+     previously appeared in the log.
+
+4. Bug fixes:
+     - Lock ordering: _check_one now reads the device IP from _dev_cache under
+       _dev_cache_lock rather than calling _cache_states() (which acquired
+       _dev_cache_lock internally) and then immediately acquiring _known_lock —
+       a potential lock-order inversion that could cause intermittent deadlocks.
+     - Manually-created devices (e.g. MAC 00:00:11:00:00:01) with pingMode =
+       pingOnly never pinged because no ARP/sniff history meant ip="" and
+       _check_one returned early.  IP is now fetched from the device cache
+       (ipNumber state) when _known has no entry for the MAC.
+     - Results loop used ip from the pre-probe snapshot; _check_one may have
+       populated _known[mac]["ip"] from the device cache during the probe, so
+       the live _known value is now read inside the lock for the results loop.
+     - Device ID race: a concurrent ARP/sniff thread can update
+       _known[mac]["indigo_device_id"] between probe completion and the results
+       loop, causing _update_indigo_device to update the wrong device.  Fixed
+       by passing snapshot[mac]["indigo_device_id"] directly to
+       _update_indigo_device (new dev_id parameter) so it updates the exact
+       device that was probed.
+
+================================================================================
+Version 2026.5.40 (2026-04-22)
+
+1. Per-device Offline Check Interval (new device setting):
+     New "Offline Check Interval" menu in the Network Device edit dialog.
+     Options: 0 (use global scan interval), 15 s, 30 s, 1 min, 2 min, 5 min.
+     When a device is offline and this is set, active probes are rate-limited
+     to the chosen interval instead of firing on every scan cycle.  Allows
+     faster recovery detection (e.g. every 15 s) independently of the global
+     scan interval.  Implemented by reusing the existing ping_only_next_probe
+     timestamp in _known.  Applies to all ping modes except "Not at all" and
+     "Ping only" (which already has its own 15 s / 60 s adaptive timer).
+
+2. Flip Address / Notes now covers all device types:
+     Previously the "Flip Address / Notes Columns" PluginConfig setting only
+     updated networkDevice devices; networkDevicesHomeAway and externalDevice
+     were unchanged.
+       - networkDevicesHomeAway: Address ↔ IP summary / Notes ↔ MACs on flip.
+         _recalc_group_device now reads the pref on every live recalc, so the
+         columns stay correct as devices come and go without a manual trigger.
+       - externalDevice: Address ↔ resolved IP / Notes ↔ hostname on flip.
+         The live IP update path and deviceStartComm both respect the pref on
+         plugin restart.  When the ipNumber state is empty the existing column
+         value (description when flipping OFF→ON, address prop when ON→OFF) is
+         used as a fallback so the swap happens immediately without waiting for
+         the next ping.
+
+3. Flip change detection fixed:
+     Indigo writes the new preference values into self.pluginPrefs before
+     calling closedPrefsConfigUi, so the previous comparison
+     (valuesDict vs pluginPrefs) was always equal — _flip_changed was always
+     False and _apply_flip_address_notes was never called.  Fixed by storing
+     the last-saved value in self._flip_address_notes_prev (set in __init__,
+     updated after each save) and comparing against that instead.
+
+4. Flip device iteration bug fixed:
+     _apply_flip_address_notes used indigo.devices.iter(DEVICE_TYPE_ID) which
+     passes "networkDevice" as the plugin-ID filter — matching nothing.  All
+     other loops in the file correctly use PLUGIN_ID.  Changed to
+     indigo.devices.iter(PLUGIN_ID) with an inner deviceTypeId guard.
+
+================================================================================
 Version 2026.5.37 (2026-04-22)
 
 1. localName replaced by two separate states (mdnsName + arpHostname):

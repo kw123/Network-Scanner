@@ -43,8 +43,9 @@ No third-party packages required.
    - Winning TCP port remembered per device and tried first next time.
    - After 5 consecutive all-port failures the TCP probe is suspended (auto-resets when ping succeeds).
    - Per-device **Ping only** option skips TCP fallback entirely.
-   - **Sweep-freshness skip:** if the ARP sweep confirmed the device within the last `scan-interval − 10 s`, the per-device probe is skipped — the sweep result is used directly, reducing redundant probing.
-   - **False-positive guard:** when a device that is currently offline gets a positive ICMP response, a TCP probe is run as confirmation before the device is brought back online. Routers/gateways proxy ICMP for their ARP-cached neighbours but do not proxy TCP, so a TCP reply (connect or RST) proves the device's own stack is running. For `pingOnly` devices or those where TCP has never worked, a second ICMP ping is used instead (1-second gap).
+   - **Sweep-freshness skip:** if the ARP sweep confirmed a non-pingOnly device within the last `scan-interval − 10 s`, the per-device probe is skipped — the sweep result is used directly, reducing redundant probing. pingOnly devices have their own adaptive timer (see below) and are handled separately: if the ARP sweep pinged the same IP within the last 10 s, the dedicated pingOnly probe is skipped for that cycle and the timer is advanced, preventing a double-ping.
+   - **False-positive guard (confirm mode):** when a device that is currently offline gets a positive ICMP response, a TCP probe is run as confirmation before the device is brought back online. Routers proxy ICMP for recently-disconnected clients but never proxy TCP, so a TCP reply proves the device's own stack is alive. If TCP has worked before for this device (`curlPort` is set) but is failing now, the device stays offline — no second-ICMP fallback (which proxy-ARP can fake). Second ICMP is used only for devices where TCP has genuinely never worked (pure IoT with no open ports).
+   - **False-positive guard (pingOnly mode):** the ARP sweep may reset `last_seen` via proxy-ARP replies even when the device is offline, preventing the offline threshold from expiring. `pingOnly` devices use a separate `ping_only_last_ping_ok` timestamp that is updated only by the dedicated ICMP probe — never by the ARP sweep. The offline threshold is measured against this timestamp, making it immune to proxy-ARP sweep noise.
 
 4. **DHCP enrichment** — the separate DHCP sniffer (`tcpdump -vv` on ports 67/68) extracts:
    - **Option 12** (hostname) → `dhcpHostname`. Populated only when a device sends a DHCP request — typically on first connect or lease renewal (can take hours for already-connected devices).
@@ -74,6 +75,7 @@ No third-party packages required.
 - **Offline Threshold (s)** — Unreachable for this long → marked offline. Options: 30–600 s. *(default: 180)*
 - **Auto-Create Devices** — Create an Indigo device for each new MAC address discovered. *(default: on)*
 - **Create Synthetic Devices for Ping-Only Hosts** — If an IP responds to ping but never appears in ARP (e.g. different VLAN), create a device with a synthetic MAC `00:00:00:00:00:XX`. Leave off unless you need cross-VLAN monitoring — some routers answer ping for every subnet IP, flooding the plugin with ghost devices. *(default: off)*
+- **Flip Address / Notes Columns** — Swap the Address and Notes columns for all plugin devices simultaneously. OFF (default): Address = MAC / host, Notes = IP. ON: Address = IP, Notes = MAC / host. Takes effect immediately on Save — all devices are updated at once. *(default: off)*
 - **Device Folder Name** — Indigo folder for `Net_*` devices (auto-created). Leave blank for root. *(default: Network Devices)*
 - **Variable Folder Name** — Indigo variable folder for plugin-managed variables. Auto-created. Leave blank for root.
 - **Prefix Name** — Prefix for auto-named devices (e.g. `Net_` → `Net_AA:BB:CC:DD:EE:FF`). *(default: Net_)*
@@ -122,13 +124,16 @@ While active, every event touching a listed device is written to `plugin.log` at
 
 One device per discovered MAC address. Auto-created when **Auto-Create Devices** is on.
 
-- **Address column**: MAC address
-- **Notes column**: IP with last octet zero-padded (e.g. `192.168.1.005`) for correct alphabetical sort by IP
+- **Address column**: MAC address (or padded IP when *Flip Address / Notes* is ON)
+- **Notes column**: IP with last octet zero-padded (e.g. `192.168.1.005`) for correct alphabetical sort by IP (or MAC when *Flip* is ON)
 - Name starts as `Net_AA:BB:CC:DD:EE:FF`, then automatically renamed to include vendor / local name once known
 
 ### External Device
 
 A manually configured host (IP address or DNS name) pinged on a fixed interval. No MAC tracking — useful for monitoring internet connectivity. Create via *New Device → External Device* or use **Add Internet Ping Devices…** in the plugin menu.
+
+- **Address column**: configured hostname / IP (or resolved IP when *Flip Address / Notes* is ON)
+- **Notes column**: resolved IP address (or hostname when *Flip* is ON), updated live on each ping
 
 ### Network Devices — Home or Away
 
@@ -138,8 +143,10 @@ Aggregate device that watches up to **6 Network Devices** and tracks presence.
 - **OFF** — all watched devices are offline ("everyone away")
 - `ParticipantsHome` — count of currently online participants
 - `participants` — comma-separated Indigo device IDs of all configured slots
-- **Address column** — MAC addresses of all participants (space-separated), updated live
-- **Notes column** — current IP addresses of all participants in compact form (e.g. `192.168.1. - 12 15 25`), updated live
+- **Address column** — MAC addresses of all participants (space-separated), updated live. When *Flip Address / Notes* is ON: compact IP summary — if all participants share the same /24 subnet the common prefix is shown once (e.g. `192.168.1. 112 22 44`); otherwise full IPs are shown.
+- **Notes column** — current IP addresses in compact form (e.g. `192.168.1. - 12 15 25`), updated live (or MACs when *Flip* is ON)
+
+**Delay before OFF** — optional grace period (0 / 10 / 20 / 30 / 60 / 90 / 120 / 180 s) before the device flips to OFF when all participants go offline. If any participant comes back online during the delay the OFF transition is cancelled and the device stays ON. Useful to absorb brief WiFi drops or proxy-ARP timing artefacts that would otherwise trigger Away automations prematurely. Default is 0 (immediate).
 
 Use the `ParticipantsHome` state in Indigo conditions to check if *at least N* people are home.
 
@@ -196,12 +203,16 @@ Ping **success** always wins regardless of mode — device goes online immediate
 
 #### Ping only — adaptive timing
 
-**Ping only** uses a dedicated probe schedule independent of the global scan interval:
+**Ping only** uses a dedicated probe schedule that runs independently of the global scan interval (the scan loop checks pingOnly devices every 15 s so the adaptive timer fires on time regardless of the sweep period):
 
-- **Online** — probe every 60 s. Goes offline only after the *Offline Threshold* expires — a single missed ping is never enough.
-- **Offline** — probe every 15 s. Goes online immediately on the first successful ping.
+- **Online** — probe every 60 s (or the *Online Ping Interval* if set). Goes offline only after the *Offline Threshold* expires — a single missed ping is never enough.
+- **Offline** — probe every 15 s (or the *Offline Check Interval* if set). Goes online immediately on the first successful ping.
+
+The offline threshold is measured against `ping_only_last_ping_ok` — a timestamp that is updated only when the dedicated probe itself succeeds. The ARP sweep may receive proxy-ARP replies for offline devices and would otherwise reset `last_seen`, preventing the threshold from ever expiring. `ping_only_last_ping_ok` is unaffected by sweep results.
 
 This makes it suitable for devices that suppress ARP and mDNS (routers, cameras, printers) as well as devices added manually with a custom MAC where no passive traffic is expected. The *Offline Trigger Logic* and *Missed Pings Before Offline* settings are not used in this mode — the threshold alone controls the on→off transition.
+
+> **Tip:** Set *Online Ping Interval* to 30–50 % of the *Offline Threshold* so the device is confirmed online at least twice before it can time out. For example, with a 3-minute threshold, set the interval to 60–90 s.
 
 #### Ping only — quick retry on failure
 
@@ -220,6 +231,8 @@ When *Offline Trigger Logic* is set to **OR** and the first ping fails while the
 ### Other Settings
 
 - **Missed Pings Before Offline** — Consecutive probe failures before offline is triggered (1–5). Not used in *Ping only* mode. *(default: 1)*
+- **Offline Check Interval** — How often to probe this device while it is offline to detect recovery. Only active when ping is enabled (any mode except *Not at all*). `0` = use the global Scan Interval. Smaller values catch recovery faster at the cost of more pings. Not used in *Ping only* mode (which has its own 15 s adaptive timer). *(default: 0)*
+- **Online Ping Interval** — How often to ping this device while it is online. `0` = default (60 s for *Ping only*; global Scan Interval for other modes). Increase to reduce traffic for stable devices; decrease for faster re-confirmation. Recommended: set to 30–50 % of the *Offline Threshold* so the device is confirmed at least twice before timing out. Applies to all active ping modes. *(default: 0)*
 - **Offline Threshold (s)** — Per-device override; `0` = use plugin-wide default. In *Ping only* mode this is the sole condition that triggers offline. *(default: 0)*
 - **Set IP Address** — Manually override the IP address for this device. Stored in `ipNumber` state and `known_devices.json`. Will be overwritten on the next scan if the device is seen with a different IP.
 - **Is AP or Router** — Mark this device as a proxy-ARP AP or router. IP changes from the passive sniff thread are ignored; only the ARP sweep can update its IP. Set automatically when 3 or more IP changes are detected within 10 minutes. Can be cleared here to re-enable auto-detection. *(default: off)*
@@ -441,11 +454,16 @@ Visible in *List All Discovered Devices* and *Print IP-Changed Devices* menu ite
 
 ## Fingscan Migration
 
-Three menu items under *Plugins → Network Scanner* for migrating from the Fingscan plugin:
+Four tools under *Plugins → Network Scanner → Fingscan Migration Tools…*:
 
-- **Import Names from Fingscan** — Reads all Fingscan `IP-Device` entries, matches them to NetworkScanner devices by MAC address, and writes the Fingscan device name into the `fingscanDeviceInfo` state. Logs each matched pair.
-- **Overwrite Device Names with Fingscan Names** — Uses the imported `fingscanDeviceInfo` values to rename each NetworkScanner device to `{fingscan-name}-NET_`. Only renames devices where `fingscanDeviceInfo` is non-empty.
-- **Compare Fingscan ↔ NetworkScanner** — Prints a side-by-side report showing: devices in Fingscan only, devices in NetworkScanner only, and devices in both with a conflicting online/offline state.
+- **(0) Compare** — Prints a side-by-side report: devices in Fingscan only, devices in NetworkScanner only, and devices in both with a conflicting online/offline state.
+- **(1) Import Names** — Matches Fingscan `IP-Device` entries to NetworkScanner devices by MAC and writes the Fingscan name into the `fingscanDeviceInfo` state of each matched device.
+- **(2) Overwrite Names** — Uses the imported `fingscanDeviceInfo` values to rename each NetworkScanner device to `{fingscan-name}-{prefix}` (e.g. `Karl iPhone-Net`). Only renames devices where `fingscanDeviceInfo` is non-empty.
+- **(3) Copy New — COPY NEW button** — Finds Fingscan devices whose MAC has no match in NetworkScanner and creates a new `networkDevice` for each one:
+  - `pingMode = "pingOnly"`, device starts **disabled** — enable each one manually to begin monitoring
+  - Name format: `{fingscan-name}-{prefix}` (e.g. `Karl iPhone-Net`)
+  - MAC, IP, and vendor are seeded from Fingscan
+  - **Skipped automatically** (shown in log): devices with no IP, IP `0.0.0.0`, or a non-private (public/internet) IP address — add those as External Devices instead. Private ranges accepted: `10.x.x.x`, `172.16–31.x.x`, `192.168.x.x`
 
 ---
 

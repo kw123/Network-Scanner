@@ -375,6 +375,15 @@ Result is written to the log and to variable networkScanner_pingDevice (on / off
 				<CallbackMethod>overwriteDevNamesWithFingNames</CallbackMethod>
 			</Field>
 
+			<Field id="Lab3" type="label" defaultValue="">
+				<Label>(3) Copy Fingscan devices not yet in NetworkScanner — created as oldfingName-net-ping-only, DISABLED. Enable each one manually to start monitoring.</Label>
+			</Field>
+
+			<Field id="executeCopyFingscanOnly" type="button">
+				<Title>COPY NEW</Title>
+				<CallbackMethod>copyFingscanOnlyToNetworkScanner</CallbackMethod>
+			</Field>
+
 		</ConfigUI>
 	</MenuItem>
 

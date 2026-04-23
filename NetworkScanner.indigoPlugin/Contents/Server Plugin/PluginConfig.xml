@@ -117,6 +117,15 @@ No extra threads or CPU when off</Label>
 WARNING: some routers (proxy-ARP) answer ping on behalf of every IP on the subnet, which will flood this plugin with fake devices. Leave OFF unless you specifically need cross-VLAN monitoring.</Label>
 	</Field>
 
+	<Field id="flipAddressNotes" type="checkbox" defaultValue="false">
+		<Label>Flip Address / Notes Columns</Label>
+	</Field>
+
+	<Field id="flipAddressNotesLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+		<Label>OFF (default): Address = MAC address, Notes = IP address.
+ON: Address = IP address, Notes = MAC address.</Label>
+	</Field>
+
 	<Field id="deviceFolder" type="textfield">
 		<Label>Device Folder Name</Label>
 	</Field>
