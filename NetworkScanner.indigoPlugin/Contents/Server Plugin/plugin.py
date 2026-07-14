@@ -251,6 +251,17 @@ def _strip_local_suffix(name: str) -> str:
 	return name
 
 
+def _normalize_mac(mac: str) -> str:
+	"""Lowercase a MAC and zero-pad each octet: '0:1E:C2:9:A:B' -> '00:1e:c2:09:0a:0b'.
+	macOS `arp -a` strips leading zeros, while tcpdump output and the _known
+	dict keys use the fully padded form — normalize so lookups always match.
+	"""
+	try:
+		return ":".join(f"{int(p, 16):02x}" for p in mac.strip().split(":"))
+	except Exception:
+		return mac.strip().lower()
+
+
 def _mac_to_device_name(mac: str, vendor: str = "", local_name: str = "", prefixName: str = "Net_") -> str:
 	"""Build the auto-generated device name.
 
@@ -1530,7 +1541,7 @@ class Plugin(indigo.PluginBase):
 		if self._schema_changed:
 			dev.stateListOrDisplayStateIdChanged()
 
-		mac = dev.states.get("MACNumber", "")
+		mac = dev.states.get("MACNumber", "").lower()
 		if mac:
 			with self._known_lock:
 				entry = self._known.get(mac, {})
@@ -2193,129 +2204,129 @@ class Plugin(indigo.PluginBase):
 								self._register_device(mac, ip, source="traffic observed (tcpdump)")
 							continue
 
-					# ── ARP Announcement (Gratuitous ARP): "I am at <IP>" ──────
-					# tcpdump reports these as "Announcement <IP>" rather than
-					# "Reply <IP> is-at <MAC>".  The source MAC in the ethernet
-					# header IS the announcing device — register immediately.
-					if "Announcement " in line:
-						mm = _src_mac_re.match(line)
-						if mm:
-							ann_mac = mm.group(1).lower()
-							if ann_mac not in ("00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff") \
-									and not (int(ann_mac[:2], 16) & 1):
-								ma = re.search(r'\bAnnouncement\s+([\d.]+)', line, re.I)
-								if ma:
-									ann_ip = ma.group(1)
-									key = (ann_mac, ann_ip)
-									if now - _throttle.get(key, 0) >= _THROTTLE_SECS:
-										_throttle[key] = now
-										_throttle[ann_mac] = now
-										self._trace_log(ann_mac, ann_ip, "sniff-ARP-announce",
-											f"line={line[:140]!r}")
-										self._register_device(ann_mac, ann_ip,
-											source="traffic observed (tcpdump)")
-						continue
+						# ── ARP Announcement (Gratuitous ARP): "I am at <IP>" ──────
+						# tcpdump reports these as "Announcement <IP>" rather than
+						# "Reply <IP> is-at <MAC>".  The source MAC in the ethernet
+						# header IS the announcing device — register immediately.
+						if "Announcement " in line:
+							mm = _src_mac_re.match(line)
+							if mm:
+								ann_mac = mm.group(1).lower()
+								if ann_mac not in ("00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff") \
+										and not (int(ann_mac[:2], 16) & 1):
+									ma = re.search(r'\bAnnouncement\s+([\d.]+)', line, re.I)
+									if ma:
+										ann_ip = ma.group(1)
+										key = (ann_mac, ann_ip)
+										if now - _throttle.get(key, 0) >= _THROTTLE_SECS:
+											_throttle[key] = now
+											_throttle[ann_mac] = now
+											self._trace_log(ann_mac, ann_ip, "sniff-ARP-announce",
+												f"line={line[:140]!r}")
+											self._register_device(ann_mac, ann_ip,
+												source="traffic observed (tcpdump)")
+							continue
 
-					# ── mDNS: register device + parse PTR/SRV/A records ────────
-					if ".5353 >" in line:
-						mm = _src_mac_re.match(line)
-						if mm:
-							mdns_mac = mm.group(1).lower()
-							if not (mdns_mac == "ff:ff:ff:ff:ff:ff" or (int(mdns_mac[:2], 16) & 1)):
-								# IPv4: try ethernet-header src first (IPv4 mDNS),
-								# then fall back to the mDNS A record in the payload
-								# (IPv6 mDNS — src is link-local, real IP is in A record).
-								mi = _src_ip_re.search(line)
-								mdns_ip = mi.group(1) if mi else ""
-								if not mdns_ip or mdns_ip.startswith("169.254."):
-									ma_rec = re.search(
-										r'(?<!\w)A\s+(\d{1,3}(?:\.\d{1,3}){3})\b', line)
-									if ma_rec:
-										mdns_ip = ma_rec.group(1)
-								# Register device to keep last_seen fresh
-								if mdns_ip and not mdns_ip.startswith("169.254.") \
-										and mdns_ip != "0.0.0.0":
-									if now - _throttle.get(mdns_mac, 0) >= _THROTTLE_SECS:
-										_throttle[mdns_mac] = now
-										self._register_device(mdns_mac, mdns_ip,
-											source="traffic observed (tcpdump)")
+						# ── mDNS: register device + parse PTR/SRV/A records ────────
+						if ".5353 >" in line:
+							mm = _src_mac_re.match(line)
+							if mm:
+								mdns_mac = mm.group(1).lower()
+								if not (mdns_mac == "ff:ff:ff:ff:ff:ff" or (int(mdns_mac[:2], 16) & 1)):
+									# IPv4: try ethernet-header src first (IPv4 mDNS),
+									# then fall back to the mDNS A record in the payload
+									# (IPv6 mDNS — src is link-local, real IP is in A record).
+									mi = _src_ip_re.search(line)
+									mdns_ip = mi.group(1) if mi else ""
+									if not mdns_ip or mdns_ip.startswith("169.254."):
+										ma_rec = re.search(
+											r'(?<!\w)A\s+(\d{1,3}(?:\.\d{1,3}){3})\b', line)
+										if ma_rec:
+											mdns_ip = ma_rec.group(1)
+									# Register device to keep last_seen fresh
+									if mdns_ip and not mdns_ip.startswith("169.254.") \
+											and mdns_ip != "0.0.0.0":
+										if now - _throttle.get(mdns_mac, 0) >= _THROTTLE_SECS:
+											_throttle[mdns_mac] = now
+											self._register_device(mdns_mac, mdns_ip,
+												source="traffic observed (tcpdump)")
 
-								# Only parse records from RESPONSES, not queries.
-								# Queries contain "(QM)?" — responses do not.
-								is_response = "(QM)?" not in line
-								passive = {}
+									# Only parse records from RESPONSES, not queries.
+									# Queries contain "(QM)?" — responses do not.
+									is_response = "(QM)?" not in line
+									passive = {}
 
-								# Hostname from SRV record: "SRV hostname.local.:port"
-								srv_m = re.search(r'\bSRV\s+([\w\-]+)\.local\.', line)
-								if srv_m:
-									passive["mdns_name"] = srv_m.group(1)
+									# Hostname from SRV record: "SRV hostname.local.:port"
+									srv_m = re.search(r'\bSRV\s+([\w\-]+)\.local\.', line)
+									if srv_m:
+										passive["mdns_name"] = srv_m.group(1)
 
-								if is_response:
-									# Service types from PTR records (responses only)
-									svc_types = []
-									for m_ptr in re.finditer(
-											r'PTR\s+(\S*?_[^.]+\._(tcp|udp)\.local\.)', line):
-										full  = m_ptr.group(1).rstrip(".")
-										parts = full.split(".")
-										# instance._svc._proto.local → _svc._proto
-										# _svc._proto.local          → _svc._proto
-										if len(parts) >= 3:
-											svc_types.append(f"{parts[-3]}.{parts[-2]}")
-										elif len(parts) == 2:
-											svc_types.append(full)
-									if svc_types:
-										with self._known_lock:
-											entry    = self._known.get(mdns_mac, {})
-											existing = set(entry.get("mdns_services_set", []))
-										new_svcs = set(svc_types) - existing
-										if new_svcs:
-											all_svcs = existing | new_svcs
+									if is_response:
+										# Service types from PTR records (responses only)
+										svc_types = []
+										for m_ptr in re.finditer(
+												r'PTR\s+(\S*?_[^.]+\._(tcp|udp)\.local\.)', line):
+											full  = m_ptr.group(1).rstrip(".")
+											parts = full.split(".")
+											# instance._svc._proto.local → _svc._proto
+											# _svc._proto.local          → _svc._proto
+											if len(parts) >= 3:
+												svc_types.append(f"{parts[-3]}.{parts[-2]}")
+											elif len(parts) == 2:
+												svc_types.append(full)
+										if svc_types:
 											with self._known_lock:
-												if mdns_mac in self._known:
-													self._known[mdns_mac]["mdns_services_set"] = list(all_svcs)
-											passive["mdns_services"] = ", ".join(sorted(all_svcs))
+												entry    = self._known.get(mdns_mac, {})
+												existing = set(entry.get("mdns_services_set", []))
+											new_svcs = set(svc_types) - existing
+											if new_svcs:
+												all_svcs = existing | new_svcs
+												with self._known_lock:
+													if mdns_mac in self._known:
+														self._known[mdns_mac]["mdns_services_set"] = list(all_svcs)
+												passive["mdns_services"] = ", ".join(sorted(all_svcs))
 
-									# OS hint from Apple-exclusive service types.
-									# These only appear on iOS/macOS — strong signal.
-									_APPLE_SVCS = {
-										"_asquic._udp", "_companion-link._tcp",
-										"_rdlink._tcp",  "_apple-mobdev2._tcp",
-										"_airplay._tcp", "_raop._tcp",
-										"_homekit._tcp", "_sleep-proxy._udp",
-										"_device-info._tcp",
-									}
-									if set(svc_types) & _APPLE_SVCS:
-										passive["os_hint"] = "Apple (iOS/macOS)"
+										# OS hint from Apple-exclusive service types.
+										# These only appear on iOS/macOS — strong signal.
+										_APPLE_SVCS = {
+											"_asquic._udp", "_companion-link._tcp",
+											"_rdlink._tcp",  "_apple-mobdev2._tcp",
+											"_airplay._tcp", "_raop._tcp",
+											"_homekit._tcp", "_sleep-proxy._udp",
+											"_device-info._tcp",
+										}
+										if set(svc_types) & _APPLE_SVCS:
+											passive["os_hint"] = "Apple (iOS/macOS)"
 
-								if passive:
-									self._update_passive_info(mdns_mac, **passive)
-						continue   # ← inside the mDNS if-block; only skips mDNS lines
+									if passive:
+										self._update_passive_info(mdns_mac, **passive)
+							continue   # ← inside the mDNS if-block; only skips mDNS lines
 
-					# ── All other frames: src MAC + src IP (IPv4 only) ──────────
-					mm = _src_mac_re.match(line)
-					if not mm:
-						continue
-					mac = mm.group(1).lower()
-					# Skip broadcast and multicast MACs (LSB of first octet = 1)
-					if mac == "ff:ff:ff:ff:ff:ff" or (int(mac[:2], 16) & 1):
-						continue
-					# Throttle: skip if registered recently
-					if now - _throttle.get(mac, 0) < _THROTTLE_SECS:
-						continue
-					# Need an IP — try IPv4 payload format first, then ARP sender format
-					mi = _src_ip_re.search(line) or _arp_ip_re.search(line)
-					if not mi:
-						continue
-					ip = mi.group(1)
-					# Skip unroutable source IPs: DHCP Discover/Request uses 0.0.0.0
-					# before the client has an address; 169.254.x.x is link-local only.
-					if ip == "0.0.0.0" or ip.startswith("169.254."):
-						continue
-					_log_raw_if_wanted(mac, line)
-					_throttle[mac] = now
-					self._trace_log(mac, ip, "sniff-frame",
-						f"ip={ip}  line={line[:140]!r}")
-					self._register_device(mac, ip, source="traffic observed (tcpdump)")
+						# ── All other frames: src MAC + src IP (IPv4 only) ──────────
+						mm = _src_mac_re.match(line)
+						if not mm:
+							continue
+						mac = mm.group(1).lower()
+						# Skip broadcast and multicast MACs (LSB of first octet = 1)
+						if mac == "ff:ff:ff:ff:ff:ff" or (int(mac[:2], 16) & 1):
+							continue
+						# Throttle: skip if registered recently
+						if now - _throttle.get(mac, 0) < _THROTTLE_SECS:
+							continue
+						# Need an IP — try IPv4 payload format first, then ARP sender format
+						mi = _src_ip_re.search(line) or _arp_ip_re.search(line)
+						if not mi:
+							continue
+						ip = mi.group(1)
+						# Skip unroutable source IPs: DHCP Discover/Request uses 0.0.0.0
+						# before the client has an address; 169.254.x.x is link-local only.
+						if ip == "0.0.0.0" or ip.startswith("169.254."):
+							continue
+						_log_raw_if_wanted(mac, line)
+						_throttle[mac] = now
+						self._trace_log(mac, ip, "sniff-frame",
+							f"ip={ip}  line={line[:140]!r}")
+						self._register_device(mac, ip, source="traffic observed (tcpdump)")
 
 				# Inner loop exited — kill tcpdump if still running
 				try:
@@ -2854,7 +2865,7 @@ class Plugin(indigo.PluginBase):
 			# Real hostnames come from the OS mDNS/Bonjour cache (Avahi / mdnsResponder).
 			# Group 1 = raw name ('?' or hostname), Group 2 = IP, Group 3 = MAC
 			arp_re   = re.compile(
-				r"^(\S+)\s+\((\d+\.\d+\.\d+\.\d+)\)\s+at\s+([0-9a-f:]{17})",
+				r"^(\S+)\s+\((\d+\.\d+\.\d+\.\d+)\)\s+at\s+([0-9a-f]{1,2}(?::[0-9a-f]{1,2}){5})",
 				re.IGNORECASE
 			)
 			# Deduplicate ARP entries by MAC: a proxy-ARP router or WiFi AP can appear
@@ -2870,7 +2881,7 @@ class Plugin(indigo.PluginBase):
 				m = arp_re.search(line)
 				if not m:
 					continue
-				raw_name, ip, mac = m.group(1), m.group(2), m.group(3).lower()
+				raw_name, ip, mac = m.group(1), m.group(2), _normalize_mac(m.group(3))
 				if mac == "ff:ff:ff:ff:ff:ff":
 					continue
 				# Extract "on enX" interface name — first occurrence per MAC wins
@@ -2931,10 +2942,12 @@ class Plugin(indigo.PluginBase):
 				else:
 					self._discover_device(mac, ip, local_name=local_name, clear_local_name=proxy_arp and not local_name)
 					discov_n += 1
-				# Store the winning curl port (or None if ping sufficed / not reachable)
-				with self._known_lock:
-					if mac in self._known:
-						self._known[mac]["curlPort"] = curl_ports_by_ip.get(ip)
+				# Store the winning curl port — only when one was found this sweep;
+				# ICMP-reachable devices keep their previously learned port hint.
+				if ip in curl_ports_by_ip:
+					with self._known_lock:
+						if mac in self._known:
+							self._known[mac]["curlPort"] = curl_ports_by_ip[ip]
 				# Push network interface name (e.g. en0 = WiFi, en1 = Ethernet)
 				if mac in arp_iface:
 					self._update_passive_info(mac, network_iface=arp_iface[mac])
@@ -2965,7 +2978,7 @@ class Plugin(indigo.PluginBase):
 				# _ping_only_pending values are (first_seen_ts, sweep_count) tuples.
 				# Accept plain floats left over from older code and convert them.
 				cleaned = {}
-				for ip, val in self._ping_only_pending.items():
+				for ip, val in list(self._ping_only_pending.items()):
 					if ip in ips_with_mac or ip in real_mac_ips:
 						continue   # real MAC appeared — drop it
 					if isinstance(val, tuple):
@@ -2975,7 +2988,9 @@ class Plugin(indigo.PluginBase):
 					if ts <= stale_cutoff:
 						continue   # too old — drop
 					cleaned[ip] = (ts, sc)
-				self._ping_only_pending = cleaned
+				for _stale_ip in [k for k in list(self._ping_only_pending) if k not in cleaned]:
+					self._ping_only_pending.pop(_stale_ip, None)
+				self._ping_only_pending.update(cleaned)
 
 				for ip in list(responded):
 					if ip in ips_with_mac:
@@ -3192,9 +3207,9 @@ class Plugin(indigo.PluginBase):
 						)
 						for _arpl in arp_result.stdout.splitlines():
 							if ip in _arpl:
-								m = re.search(r'at\s+([0-9a-f:]{17})', _arpl, re.IGNORECASE)
+								m = re.search(r'at\s+([0-9a-f]{1,2}(?::[0-9a-f]{1,2}){5})', _arpl, re.IGNORECASE)
 								if m:
-									real_mac_found = m.group(1).lower()
+									real_mac_found = _normalize_mac(m.group(1))
 									break
 					except Exception:
 						pass
@@ -3396,7 +3411,7 @@ class Plugin(indigo.PluginBase):
 											_aline, re.IGNORECASE)
 										if _am:
 											break
-								if _am and _am.group(1).lower() != mac.lower():
+								if _am and _normalize_mac(_am.group(1)) != _normalize_mac(mac):
 									ping_ok = False
 									if log_ping:
 										self.indiLOG.log(10,
@@ -4323,7 +4338,7 @@ class Plugin(indigo.PluginBase):
 				continue
 
 			# Honour per-device ping interval — read from cache, no IPC needed for skip decision
-			interval = int(self._cache_props(dev_id).get("pingInterval", 60))
+			interval = int(self._cache_props(dev_id).get("pingInterval", "120") or 120)
 			if now - info.get("last_ping", 0) < interval:
 				continue
 			info["last_ping"] = now
@@ -4489,6 +4504,7 @@ class Plugin(indigo.PluginBase):
 		props     = {"checkInterval": "300", "comment": ""}
 		try:
 			kwargs = {
+				"pluginId":     PLUGIN_ID,
 				"deviceTypeId": INTERNET_ADDRESS,
 				"name":         "Internet Address",
 				"props":        props,
@@ -5619,7 +5635,8 @@ class Plugin(indigo.PluginBase):
 			f"Fingscan:{len(fing)}  Net:{len(net)}  "
 			f"fing-only:{len(fing_only)}  net-only:{len(net_only)}  conflicts:{len(conflicts)}"
 		)
-		valuesDict["MSG"] = summary
+		if valuesDict is not None:
+			valuesDict["MSG"] = summary
 		return valuesDict
 
 	###----------------------------------------------------------###
@@ -5811,6 +5828,7 @@ class Plugin(indigo.PluginBase):
 			if fing_name is None:
 				continue
 			try:
+				dev.updateStateOnServer("fingscanDeviceInfo", fing_name)
 				count += 1
 				out.append(f"  {mac}  {dev.name}  ←  {fing_name}")
 			except Exception as e:
@@ -5848,7 +5866,8 @@ class Plugin(indigo.PluginBase):
 
 		out = '\n'.join(out)
 		self.indiLOG.log(20, f" ... found {countN} name overwrites: {out}")
-		valuesDict["MSG"] = f"{countN} name overwrites"
+		if valuesDict is not None:
+			valuesDict["MSG"] = f"{countN} name overwrites"
 
 		return valuesDict
 
@@ -6687,11 +6706,12 @@ MENU ITEMS  (Plugins -> Network Scanner)
                             per night after 02:00 in quiet mode — only
                             devices with newly discovered ports are logged.
 
-  Slow Port Scan            Probes all 1 001 TCP ports (0-1 000) on one
-  (0-1000) on One Device    selected device at <= 2 ports/second.  Runs in
-                            the background (~8-17 min).  Progress logged
-                            every 100 ports; final report lists all open
-                            ports and merges them into openPorts state.
+  Slow Port Scan            Probes TCP ports 1 up to a selectable limit
+  on One Device             (1000/2000/3000/5000/10000) on one device at
+                            <= 2 ports/second.  Runs in the background.
+                            Est. times: 1k~8-17m, 2k~17-33m, 5k~42-83m,
+                            10k~83-167m.  Progress every 100 ports; final
+                            report merges results into openPorts state.
 
   Set a State of Device     Manually overwrite any state on any plugin
                             device (debug / repair tool).
@@ -6986,49 +7006,58 @@ MENU ITEMS  (Plugins -> Network Scanner)
 			valuesDict["slowScanMsg"] = f"⚠  {dev.name} has no IP address — cannot scan."
 			return valuesDict
 
+		try:
+			port_end = int(valuesDict.get("portRange", "2000"))
+		except (ValueError, TypeError):
+			port_end = 2000
+
 		thread_name = f"NS-SlowScan-{dev_id}"
 		for t in threading.enumerate():
 			if t.name == thread_name and t.is_alive():
 				valuesDict["slowScanMsg"] = f"⚠  Scan already running for {dev.name} — wait for it to finish."
 				return valuesDict
 
+		# Estimate: best case = port_end × 0.5 s (RATE_DELAY), worst = × 1.0 s (TIMEOUT + RATE_DELAY)
+		est_min = int(port_end * 0.5 / 60)
+		est_max = int(port_end * 1.0 / 60)
 		valuesDict["slowScanMsg"] = (
-			f"▶  Scan started for {dev.name} ({ip})  —  1 001 ports at ≤ 2/s."
-			f"  Results in log in ~8–17 min."
+			f"▶  Scan started for {dev.name} ({ip})"
+			f"  —  1–{port_end} ports at ≤ 2/s  (~{est_min}–{est_max} min)."
 		)
 		threading.Thread(
 			target=self._slow_port_scan_worker,
-			args=(dev_id, ip, dev.name),
+			args=(dev_id, ip, dev.name, port_end),
 			daemon=True,
 			name=thread_name,
 		).start()
 		return valuesDict
 
 	###----------------------------------------------------------###
-	def _slow_port_scan_worker(self, dev_id: int, ip: str, dev_name: str):
-		"""Probe all TCP ports 0–1000 on one device at ≤ 2 ports/second.
+	def _slow_port_scan_worker(self, dev_id: int, ip: str, dev_name: str,
+	                           port_end: int = 2000):
+		"""Probe TCP ports 1–port_end on one device at ≤ 2 ports/second.
 
-		Sequential — each port gets a 0.5 s connect timeout; a 0.5 s pause is added
-		after each probe so the device is never hammered faster than 2 probes/second.
-		Total run time: ~8 min (all ports respond quickly) to ~17 min (all time out).
-		Progress is logged every 100 ports.  Final report lists all open ports and
-		merges them cumulatively into the device's openPorts state.
+		Sequential — each port gets a 0.5 s connect timeout; a 0.5 s pause is
+		added after each probe so the device is never hammered faster than
+		2 probes/second.  Progress is logged every 100 ports.  Final report
+		lists all open ports and merges them cumulatively into openPorts state.
 		"""
-		PORT_START = 0
-		PORT_END   = 1000
-		RATE_DELAY = 0.5   # seconds between probe *starts* (≤ 2 probes/second)
+		PORT_START = 1
+		RATE_DELAY = 0.5   # seconds between probe starts (≤ 2 probes/second)
 		TIMEOUT    = 0.5   # socket connect timeout in seconds
 
-		total = PORT_END - PORT_START + 1
+		total      = port_end - PORT_START + 1
 		found: list = []
+		est_min    = int(total * RATE_DELAY        / 60)
+		est_max    = int(total * (TIMEOUT + RATE_DELAY) / 60)
 
 		self.indiLOG.log(20,
 			f"Slow port scan started: {dev_name} ({ip})"
-			f"  •  ports {PORT_START}–{PORT_END}  ({total} ports)"
-			f"  •  ≤ 2 ports/s  •  est. 8–17 min"
+			f"  •  ports {PORT_START}–{port_end}  ({total} ports)"
+			f"  •  ≤ 2 ports/s  •  est. {est_min}–{est_max} min"
 		)
 
-		for port in range(PORT_START, PORT_END + 1):
+		for port in range(PORT_START, port_end + 1):
 			if self._stop_event.is_set():
 				self.indiLOG.log(20,
 					f"Slow port scan aborted (plugin stopping): {dev_name} ({ip})"
@@ -7050,7 +7079,7 @@ MENU ITEMS  (Plugins -> Network Scanner)
 				pct       = (port - PORT_START + 1) / total * 100
 				found_str = ", ".join(str(p) for p in found) if found else "none"
 				self.indiLOG.log(20,
-					f"  Slow scan {dev_name}: port {port}/{PORT_END}"
+					f"  Slow scan {dev_name}: port {port}/{port_end}"
 					f"  ({pct:.0f}%)  open so far: {found_str}"
 				)
 
@@ -7068,7 +7097,7 @@ MENU ITEMS  (Plugins -> Network Scanner)
 		self.indiLOG.log(20,
 			f"Slow Port Scan Results — {dev_name} ({ip})  •  {_now_str()}"
 		)
-		self.indiLOG.log(20, f"  Scanned ports {PORT_START}–{PORT_END}  ({total} ports)")
+		self.indiLOG.log(20, f"  Scanned ports {PORT_START}–{port_end}  ({total} ports)")
 		if found:
 			self.indiLOG.log(20, f"  {len(found)} open port(s) found:")
 			for p in found:
@@ -7076,7 +7105,7 @@ MENU ITEMS  (Plugins -> Network Scanner)
 				desc = _SCAN_PORTS[p][1] if p in _SCAN_PORTS else ""
 				self.indiLOG.log(20, f"    {p:<7} {svc:<12} {desc}")
 		else:
-			self.indiLOG.log(20, f"  no open ports found in range {PORT_START}–{PORT_END}")
+			self.indiLOG.log(20, f"  no open ports found in range {PORT_START}–{port_end}")
 		self.indiLOG.log(20, sep)
 
 		# Merge open ports cumulatively into the device's openPorts state
@@ -7208,7 +7237,7 @@ MENU ITEMS  (Plugins -> Network Scanner)
 	###----------------------------------------------------------###
 	def pingDeviceAction(self, pluginAction, dev, callerWaitingForResult):
 		"""Ping a single device on demand."""
-		mac   = dev.states.get("MACNumber", "")
+		mac   = dev.states.get("MACNumber", "").lower()
 		ip    = dev.states.get("ipNumber",  "")
 		iface = self.pluginPrefs.get("networkInterface", "_auto").strip()
 		if not iface or iface == "_auto":
@@ -7229,7 +7258,7 @@ MENU ITEMS  (Plugins -> Network Scanner)
 			self._known[mac] = entry
 
 		local_name = self._known.get(mac, {}).get("local_name", "")
-		self._update_indigo_device_states(dev, mac, ip, vendor, online, local_name=local_name)
+		self._update_indigo_device_states(dev.id, mac, ip, vendor, online, local_name=local_name)
 		self.indiLOG.log(10, f"{dev.name} ({ip}) is {'ONLINE' if online else 'OFFLINE'}")
 
 	# ------------------------------------------------------------------

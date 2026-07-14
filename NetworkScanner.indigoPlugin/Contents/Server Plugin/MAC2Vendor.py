@@ -9,6 +9,7 @@ import os
 import sys
 import time
 import json
+import codecs
 
 # ===========================================================================
 # MAP2Vendor Class
@@ -20,8 +21,8 @@ class MAP2Vendor:
 	def __init__(self, pathToMACFiles = "", refreshFromIeeAfterDays = 10, myLogger = ""):
 
 		self.myLogger = myLogger
-		self.myLogger(10, u"MAP2Vendor initializing with python v:{}".format(sys.version_info[0]))
-		self.myLogger(10, u"MAP2Vendor path for download files and json file:{}".format(pathToMACFiles))
+		self.myLogger(10, "MAP2Vendor initializing with python v:{}".format(sys.version_info[0]))
+		self.myLogger(10, "MAP2Vendor path for download files and json file:{}".format(pathToMACFiles))
 
 		self.minSizeOfFiles = {"mac2Vendor.json":700000, "oui":500000,"mam": 30000, "oui36":40000}
 
@@ -35,15 +36,15 @@ class MAP2Vendor:
 			self.filePath = pathToMACFiles
 			if self.filePath[-1] != "/": self.filePath+="/"
 			if not os.path.isdir(self.filePath):
-				self.myLogger(10, u"MAP2Vendor (i) making directory:" +self.filePath)
+				self.myLogger(10, "MAP2Vendor (i) making directory:" +self.filePath)
 				os.mkdir(self.filePath)
 		else:
 			self.filePath = self.MAChome+"indigo/mac2Vendor/"
 			if not os.path.isdir(self.MAChome+"indigo"):
-				self.myLogger(10, u"MAP2Vendor (ii) making directory:" +self.MAChome+"indigo")
-				os.mkdir(self.MAChome+"indigo'")
+				self.myLogger(10, "MAP2Vendor (ii) making directory:" +self.MAChome+"indigo")
+				os.mkdir(self.MAChome+"indigo")
 			if not os.path.isdir(self.filePath):
-				self.myLogger(10, u"MAP2Vendor (iii) making directory:" +self.filePath)
+				self.myLogger(10, "MAP2Vendor (iii) making directory:" +self.filePath)
 				os.mkdir(self.filePath)
 
 		self.refreshFromIeeAfterDays = float(refreshFromIeeAfterDays)
@@ -70,7 +71,7 @@ class MAP2Vendor:
 			self.getFilesStatus = "finished"
 			return
 
-		self.myLogger(10,u"MAP2Vendor  downloading raw files, will take some minutes stored in:{}".format(self.filePath))
+		self.myLogger(10,"MAP2Vendor  downloading raw files, will take some minutes stored in:{}".format(self.filePath))
 		cmd  =  "rm "+self.filePath+"oui ;"
 		cmd +=  "rm "+self.filePath+"mam ;"
 		cmd +=  "rm "+self.filePath+"oui36"
@@ -104,7 +105,7 @@ class MAP2Vendor:
 					test = json.loads(f.read())
 					f.close()
 				except Exception as e:
-					self.myLogger(30, u"error reading file {} in prefs dir, errcode:{}".format("mac2Vendor.json", e))
+					self.myLogger(30, "error reading file {} in prefs dir, errcode:{}".format("mac2Vendor.json", e))
 	
 				if "6" in test:
 					if len(test["6"]) < 10000:
@@ -114,7 +115,7 @@ class MAP2Vendor:
 
 				self.mac2VendorDict = test
 				if not quiet: 
-					self.myLogger(10,u"MAP2Vendor initializing  finished, read from mac2Vendor.json file")
+					self.myLogger(10,"MAP2Vendor initializing  finished, read from mac2Vendor.json file")
 				return True
 			
 			if not ( self.isFileCurrent("oui") or
@@ -122,7 +123,7 @@ class MAP2Vendor:
 					 self.isFileCurrent("oui36") ):
 					if  self.getFilesStatus == "submitted":
 						if not quiet: 
-							self.myLogger(10, u"MAP2Vendor initializing still waiting for download")
+							self.myLogger(10, "MAP2Vendor initializing still waiting for download")
 					return False
 
 			self.getFilesStatus = "finished" 
@@ -139,7 +140,7 @@ class MAP2Vendor:
 
 			return True
 		except Exception as e:
-			self.myLogger(30,u"error reading file {}, errcode:{}".format("mac2Vendor.json", e))
+			self.myLogger(30,"error reading file {}, errcode:{}".format("mac2Vendor.json", e))
 		return True
 
 
@@ -154,7 +155,7 @@ class MAP2Vendor:
 				if len(item) < 2: continue
 				self.mac2VendorDict[size][item[0]] = item[1].strip("\n")
 		except Exception as e:
-			self.myLogger(30, u"error reading file {}, errcode:{}".format(fn, e))
+			self.myLogger(30, "error reading file {}, errcode:{}".format(fn, e))
 			
 		return
 

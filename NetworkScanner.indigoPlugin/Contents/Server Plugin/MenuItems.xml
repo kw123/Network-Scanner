@@ -342,12 +342,23 @@ Result is written to the log and to variable networkScanner_pingDevice (on / off
 	</MenuItem>
 	
 	<MenuItem id="slowPortScan">
-		<Name>Slow Port Scan (0–1000) on One Device ...</Name>
+		<Name>Slow Port Scan on One Device ...</Name>
 		<ConfigUI>
 			<Field id="slowScanWarning" type="label" fontColor="orange">
-				<Label>Probes all 1 001 TCP ports (0–1 000) on one device at ≤ 2 ports/second.
-Runs in the background — takes approximately 8 to 17 minutes.
-Results and progress are printed to the Indigo log.</Label>
+				<Label>Probes TCP ports 1 up to the selected limit on one device at ≤ 2 ports/second.
+Runs entirely in the background — see estimated time next to each option.
+Progress and final results are printed to the Indigo log.</Label>
+			</Field>
+
+			<Field id="portRange" type="menu" defaultValue="2000">
+				<Label>Scan ports 1 up to:</Label>
+				<List>
+					<Option value="1000">1 000  (~8–17 min)</Option>
+					<Option value="2000">2 000  (~17–33 min)</Option>
+					<Option value="3000">3 000  (~25–50 min)</Option>
+					<Option value="5000">5 000  (~42–83 min)</Option>
+					<Option value="10000">10 000  (~83–167 min)</Option>
+				</List>
 			</Field>
 
 			<Field id="devId" type="menu" defaultValue="0">
@@ -361,7 +372,7 @@ Results and progress are printed to the Indigo log.</Label>
 				<CallbackMethod>startSlowPortScan</CallbackMethod>
 			</Field>
 
-			<Field id="slowScanMsg" type="textfield" readonly="true" defaultValue="— select a device, then click ▶ START SLOW SCAN —">
+			<Field id="slowScanMsg" type="textfield" readonly="true" defaultValue="— select range and device, then click ▶ START SLOW SCAN —">
 				<Label>Status</Label>
 			</Field>
 		</ConfigUI>

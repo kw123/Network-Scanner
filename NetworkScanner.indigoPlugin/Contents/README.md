@@ -350,7 +350,8 @@ indigo.server.sendEmailTo("your email address", subject=theSubject, body=theBody
 - **Force Immediate Rescan** — Triggers an ARP sweep + ping check immediately.
 - **Ping a Device (IP or DNS)…** — Enter any IP address or DNS name, click PING. Result is logged and written to `networkScanner_pingDevice` as `{ip} {ms}ms on/off`.
 - **Add Internet Ping Devices…** — Select from Google, Yahoo, Microsoft, CNN, Siemens, SAP, Indigodomo, or enter a custom hostname. Creates External Device entries for each selected host — device name is `Ping-{host}`. Safe to run multiple times — skips any host that already exists. Also contains an **Add Internet Address device** button.
-- **Perform Broad Port Scan on All Online Devices…** — TCP connect scan of all 25 known ports on every online device. Menu-triggered run is verbose: every device shown with all ports found; newly discovered ports marked `++++ new ++++`. Also runs automatically once per night after 02:00 in quiet mode — only devices with newly discovered ports are printed, plus `no new ports found` if nothing changed.
+- **Perform Broad Port Scan on All Online Devices…** — TCP connect scan of all 36 known ports on every online device. Menu-triggered run is verbose: every device shown with all ports found; newly discovered ports marked `++++ new ++++`. Also runs automatically once per night after 02:00 in quiet mode — only devices with newly discovered ports are printed, plus `no new ports found` if nothing changed.
+- **Slow Port Scan on One Device…** — Probes TCP ports 1 up to a selectable limit (1 000 / 2 000 / 3 000 / 5 000 / 10 000) on a single device at ≤ 2 ports/second. Runs entirely in the background (returns immediately). Progress logged every 100 ports; final report lists every open port with service name. Open ports merged cumulatively into the device's `openPorts` state. Estimated run times: 1 000 ports ≈ 8–17 min · 2 000 ≈ 17–33 min · 3 000 ≈ 25–50 min · 5 000 ≈ 42–83 min · 10 000 ≈ 83–167 min.
 - **Set a State of Device…** — Manually overwrite any state on any plugin device.
 - **Print tools…** — Combined reporting dialog:
   - *All discovered devices* — Prints all known MACs with IP, local name, vendor, on/off and last-seen to plugin.log.
@@ -408,10 +409,17 @@ Both states are write-once-per-source — a `?` result from `arp -a` never erase
 
 ## Scanned TCP Ports
 
-21 (FTP), 22 (SSH), 23 (Telnet), 25 (SMTP), 53 (DNS), 80 (HTTP), 110 (POP3), 143 (IMAP),
-443 (HTTPS), 445 (SMB), 548 (AFP), 554 (RTSP), 587 (SMTP submission), 631 (IPP/printing),
-993 (IMAPS), 995 (POP3S), 1883 (MQTT), 3306 (MySQL), 3389 (RDP), 5000 (UPnP/dev server),
-5900 (VNC), 8080 (HTTP-alt), 8443 (HTTPS-alt), 9100 (Raw printing), 32400 (Plex)
+36 ports probed by the broad port scan and the slow port scan:
+
+21 (FTP), 22 (SSH), 23 (Telnet), 25 (SMTP), 53 (DNS), 80 (HTTP), 110 (POP3),
+123 (NTP†), 143 (IMAP), 161 (SNMP†), 162 (SNMP-trap†), 389 (LDAP), 443 (HTTPS),
+445 (SMB), 548 (AFP), 554 (RTSP), 587 (SMTP submission), 631 (IPP/printing),
+636 (LDAPS), 989 (FTPS-data), 990 (FTPS), 993 (IMAPS), 995 (POP3S),
+1400 (Sonos), 1883 (MQTT), 3306 (MySQL), 3389 (RDP), 5000 (UPnP/dev server),
+5432 (PostgreSQL), 5900 (VNC), 8080 (HTTP-alt), 8123 (Home Assistant),
+8443 (HTTPS-alt), 9100 (Raw printing), 32400 (Plex), 32469 (Plex DLNA)
+
+† NTP (123), SNMP (161), and SNMP-trap (162) are primarily UDP services. A TCP hit on these ports indicates the daemon also listens on TCP (NTP time transfer, SNMPv3 TCP transport).
 
 ---
 

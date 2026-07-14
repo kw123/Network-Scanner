@@ -1,6 +1,86 @@
  Network Scanner – Indigo Plugin
 Change Log
 ================================================================================
+Version 2026.5.54 (2026-07-07)
+
+Bug-fix release — full code audit (18 fixes):
+
+1. Passive sniffing (tcpdump) — ARP-Announcement, mDNS, and generic-frame
+     parsing blocks were indented one level too shallow, so they ran only
+     once per read chunk on the last buffered line instead of once per
+     line.  Most mDNS/announcement traffic was silently ignored; passive
+     discovery of devices that never send ARP replies was broken.
+     Blocks moved inside the per-line loop.  (HIGH)
+
+2. arp -a parsing — the MAC regex required exactly 17 characters, but
+     macOS strips leading zeros (e.g. "at 0:1e:c2:9:a:b"), so every
+     device with a single-digit octet was skipped by the sweep.  Regex
+     now accepts 1-2 digit octets; new helper _normalize_mac() zero-pads
+     and lowercases so _known keys always match the tcpdump form.
+     Fixed in the sweep regex, the ping-only ARP lookup, and the
+     verification-ping MAC comparison.  (HIGH)
+
+3. deviceStartComm — MACNumber (stored uppercase) was used un-lowered as
+     a _known key, creating an orphaned duplicate entry and leaving the
+     real entry without indigo_device_id until the first scan re-linked
+     it (offline watchdog and passive-info updates were skipped in that
+     window).  Now lowercased.  Same bug fixed in pingDeviceAction.  (HIGH)
+
+4. pingDeviceAction — passed the device OBJECT instead of dev.id to
+     _update_indigo_device_states, so the on-demand ping never updated
+     the device and polluted the state-change history.  (HIGH)
+
+5. Fingscan migration, step IMPORT — importNamesFromFingscan logged the
+     matches but never wrote the fingscanDeviceInfo state, so the
+     subsequent OVERWRITE step found nothing to rename.  The state is
+     now actually written.  (HIGH)
+
+6. MAC2Vendor.py — os.mkdir path had a stray quote ("indigo'"), so on a
+     first run without ~/indigo a misnamed directory was created and the
+     mac2Vendor subdirectory creation then failed.  Also added the
+     missing "import codecs" (NameError in the fallback open path).
+
+7. addInternetAddressDevice — indigo.device.create was called without
+     pluginId; now passes pluginId=PLUGIN_ID like all other create sites.
+
+8. _ping_only_pending — iterated and wholesale-replaced without
+     protection while two sweep threads (primary + secondary interface)
+     can run concurrently; could raise "dictionary changed size during
+     iteration" or drop pending ping-only candidates.  Now iterates over
+     a snapshot and updates the dict in place.
+
+9. ARP sweep — a device that answered plain ICMP had its remembered
+     curlPort overwritten with None on every sweep, discarding the
+     preferred-port hint used by the TCP fallback probe.  The port is
+     now only stored when one was actually found.
+
+10. External devices — pingInterval fallback default was 60 s while the
+     Devices.xml default is 120 s; also guarded against an empty-string
+     property value (int("") ValueError).
+
+11. Fingscan dialog callbacks — compareFingscanToNetworkScannerDevices
+     and overwriteDevNamesWithFingNames wrote valuesDict["MSG"] without
+     a None guard (TypeError if invoked without a dialog).
+
+================================================================================
+Version 2026.5.53 (2026-04-23)
+
+1. Slow Port Scan — port range is now selectable in the menu dialog:
+     Options: 1 000 / 2 000 / 3 000 / 5 000 / 10 000 (default 2 000).
+     Each option shows its estimated run time in the dropdown.
+     The callback reads portRange from valuesDict and passes it to the
+     worker; the worker signature is _slow_port_scan_worker(dev_id, ip,
+     dev_name, port_end=2000).  Estimated min/max are computed dynamically
+     from port_end and shown in both the status field and the startup log.
+
+================================================================================
+Version 2026.5.52 (2026-04-23)
+
+1. Slow Port Scan — range extended from 0–1 000 to 1–2 000 (2 000 ports):
+     Estimated run time updated to 17–33 minutes (was 8–17 min).
+     Menu label, status message, startup log, and documentation updated.
+
+================================================================================
 Version 2026.5.51 (2026-04-23)
 
 1. Port scan — 8 new ports added to _SCAN_PORTS (now 36 ports total):
