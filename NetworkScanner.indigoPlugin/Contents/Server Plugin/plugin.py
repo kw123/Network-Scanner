@@ -10,6 +10,7 @@ __doc__ = "Network Scanner – Indigo Plugin.  See README.md for full documentat
 import indigo          # type: ignore  (provided by Indigo at runtime)
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 import subprocess
 import select
 import socket
@@ -45,7 +46,8 @@ _THROTTLE_SECS      = 30.0   # minimum seconds between registrations per MAC
 # Timing / probe constants
 # ---------------------------------------------------------------------------
 _STARTUP_WAIT_SECS      =  4     # seconds to wait before first sweep/sniff after startup
-_PROBE_POOL_DEADLINE    =  8     # seconds — ThreadPoolExecutor hard deadline for one probe cycle
+_PROBE_POOL_DEADLINE    =  8     # seconds — ThreadPoolExecutor starting deadline for one probe cycle
+_PROBE_POOL_DEADLINE_MAX = 120   # seconds — upper bound for the adaptive probe deadline (pluginPrefs "probeDeadline")
 _CURL_USELESS_LIMIT     =  5     # suspend TCP fallback after this many consecutive all-port failures
 _SWEEP_FRESHNESS_MARGIN = 10     # skip probe if device was seen within (sweep_interval - N) seconds
 
@@ -1295,6 +1297,19 @@ class Plugin(indigo.PluginBase):
 					self.in_grace_period = (time.time() - self._startup_time) < _startupGracePeriod
 					if was and not self.in_grace_period:
 						self.indiLOG.log(20, f"startup finished, offline ignore period ended")
+
+				# HOME_AWAY off-delay tick: _recalc_group_device is otherwise only
+				# called when a participant's onOffState CHANGES.  Once everyone is
+				# offline and the countdown has started, no further participant event
+				# arrives - so without this periodic re-check the pending OFF would
+				# never fire and the group device would stay ON forever.
+				if self._home_away_pending_off:
+					for _ha_id in list(self._home_away_pending_off.keys()):
+						try:
+							self._recalc_group_device(indigo.devices[_ha_id])
+						except Exception:
+							# device deleted / not found - drop the stale entry
+							self._home_away_pending_off.pop(_ha_id, None)
 					
 					
 
@@ -2811,16 +2826,38 @@ class Plugin(indigo.PluginBase):
 
 			# Ping all subnet hosts in parallel — bounded thread pool (max 30 concurrent)
 			ips = [socket.inet_ntoa(struct.pack("!I", ip_int + i)) for i in range(1, host_count + 1)]
-			with ThreadPoolExecutor(max_workers=30) as pool:
+			# Adaptive probe deadline (pluginPrefs "probeDeadline"): a subnet with many
+			# unused IPs costs ~3 s per dead host (1 s ICMP + 4 TCP ports x 0.5 s), so
+			# 254 hosts / 30 workers can need 25 s+.  Start from the last known-good
+			# value and raise it whenever a cycle times out (same pattern as arpTimeout).
+			# A timeout no longer aborts the sweep - the finished probes are kept.
+			probe_deadline = min(_PROBE_POOL_DEADLINE_MAX,
+			                     max(_PROBE_POOL_DEADLINE,
+			                         int(self.pluginPrefs.get("probeDeadline", _PROBE_POOL_DEADLINE)
+			                             or _PROBE_POOL_DEADLINE)))
+			pool = ThreadPoolExecutor(max_workers=30)
+			try:
 				futures = {pool.submit(_ping_host, ip): ip for ip in ips}
-				deadline = time.time() + _PROBE_POOL_DEADLINE
-				for fut in as_completed(futures, timeout=max(0.1, deadline - time.time())):
-					if self._stop_event.is_set():
-						return
-					try:
-						fut.result()
-					except Exception:
-						pass
+				deadline = time.time() + probe_deadline
+				try:
+					for fut in as_completed(futures, timeout=max(0.1, deadline - time.time())):
+						if self._stop_event.is_set():
+							return
+						try:
+							fut.result()
+						except Exception:
+							pass
+				except (TimeoutError, FuturesTimeoutError):
+					unfinished   = sum(1 for f in futures if not f.done())
+					new_deadline = min(probe_deadline + 15, _PROBE_POOL_DEADLINE_MAX)
+					if new_deadline > probe_deadline:
+						self.pluginPrefs["probeDeadline"] = str(new_deadline)
+					self.indiLOG.log(30,
+						f"sweep [{iface}]: probe deadline ({probe_deadline}s) hit - "
+						f"{unfinished} of {len(futures)} hosts not probed this cycle; "
+						f"continuing with partial results, next cycle gets {new_deadline}s")
+			finally:
+				pool.shutdown(wait=False, cancel_futures=True)
 
 			if self._stop_event.is_set():
 				return
@@ -3978,16 +4015,35 @@ class Plugin(indigo.PluginBase):
 			(mac, entry) for mac, entry in snapshot.items()
 			if not self._stop_event.is_set() and mac.lower() not in self._ignored_macs
 		]
-		with ThreadPoolExecutor(max_workers=20) as pool:
+		# Adaptive deadline shared with the ARP sweep (pluginPrefs "probeDeadline").
+		# A timeout keeps the partial results instead of aborting the probe cycle.
+		probe_deadline = min(_PROBE_POOL_DEADLINE_MAX,
+		                     max(_PROBE_POOL_DEADLINE,
+		                         int(self.pluginPrefs.get("probeDeadline", _PROBE_POOL_DEADLINE)
+		                             or _PROBE_POOL_DEADLINE)))
+		pool = ThreadPoolExecutor(max_workers=20)
+		try:
 			futures = {pool.submit(_check_one, mac, entry): mac for mac, entry in probe_items}
-			deadline = time.time() + _PROBE_POOL_DEADLINE
-			for fut in as_completed(futures, timeout=max(0.1, deadline - time.time())):
-				if self._stop_event.is_set():
-					return
-				try:
-					fut.result()
-				except Exception:
-					pass
+			deadline = time.time() + probe_deadline
+			try:
+				for fut in as_completed(futures, timeout=max(0.1, deadline - time.time())):
+					if self._stop_event.is_set():
+						return
+					try:
+						fut.result()
+					except Exception:
+						pass
+			except (TimeoutError, FuturesTimeoutError):
+				unfinished   = sum(1 for f in futures if not f.done())
+				new_deadline = min(probe_deadline + 15, _PROBE_POOL_DEADLINE_MAX)
+				if new_deadline > probe_deadline:
+					self.pluginPrefs["probeDeadline"] = str(new_deadline)
+				self.indiLOG.log(30,
+					f"device probe: deadline ({probe_deadline}s) hit - "
+					f"{unfinished} of {len(futures)} devices not probed this cycle; "
+					f"continuing with partial results, next cycle gets {new_deadline}s")
+		finally:
+			pool.shutdown(wait=False, cancel_futures=True)
 
 		if self._stop_event.is_set():
 			return

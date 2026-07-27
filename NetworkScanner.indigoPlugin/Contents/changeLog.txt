@@ -1,6 +1,36 @@
  Network Scanner – Indigo Plugin
 Change Log
 ================================================================================
+Version 2026.5.56 (2026-07-07)
+
+1. Home/Away off-delay never fired (reported: group device never cycles
+     OFF with any delay setting, works only with "Immediate"):
+     _recalc_group_device is event-driven - it runs when a participant's
+     onOffState CHANGES.  When the last participant went offline the
+     countdown was started and the group kept its ON state, but with all
+     participants already offline no further event ever arrived, so the
+     expired countdown was never re-checked and the group stayed ON
+     forever.  runConcurrentThread now re-evaluates any group with a
+     pending off-delay once per second until it resolves (fires OFF or
+     is cancelled by a participant coming home).
+
+================================================================================
+Version 2026.5.55 (2026-07-07)
+
+1. ARP sweep / device probe - "TimeoutError: N (of M) futures unfinished":
+     the 8 s probe-pool deadline was far too short for a subnet with many
+     unused IPs (a dead host costs ~3 s: 1 s ICMP timeout + 4 TCP ports
+     x 0.5 s; 254 hosts / 30 workers needs 25 s+), and the uncaught
+     TimeoutError aborted the ENTIRE sweep - no arp -a parse, no state
+     updates that cycle.  Both probe pools (ARP sweep and known-device
+     probe) now catch the timeout, keep the partial results, cancel the
+     unfinished probes, and adaptively raise the deadline for the next
+     cycle (pluginPrefs "probeDeadline", +15 s per timeout, capped at
+     120 s - same pattern as the adaptive arpTimeout).
+
+2. MAC2Vendor.py - removed 11 legacy Python-2 u"..." string prefixes.
+
+================================================================================
 Version 2026.5.54 (2026-07-07)
 
 Bug-fix release — full code audit (18 fixes):
