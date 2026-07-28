@@ -254,6 +254,17 @@ def _strip_local_suffix(name: str) -> str:
 	return name
 
 
+def _benign_ipc_error(e) -> bool:
+	"""True for errors that are expected noise during plugin shutdown/restart.
+
+	Indigo IPC raises messages containing "None" or "UnexpectedNullError --
+	CClientMgr not created" when a background thread calls the server while
+	the plugin host is being torn down.  Not worth an ERROR-level traceback.
+	"""
+	msg = f"{e}"
+	return ("None" in msg) or ("CClientMgr" in msg) or ("UnexpectedNull" in msg)
+
+
 def _normalize_mac(mac: str) -> str:
 	"""Lowercase a MAC and zero-pad each octet: '0:1E:C2:9:A:B' -> '00:1e:c2:09:0a:0b'.
 	macOS `arp -a` strips leading zeros, while tcpdump output and the _known
@@ -721,7 +732,13 @@ class Plugin(indigo.PluginBase):
 		self._ping_only_pending:          dict  = {}
 		self._last_synthetic_created_at:  float = 0.0   # rate-limit: max 1 synthetic MAC per _SYNTHETIC_MAC_CREATE_INTERVAL
 		self._sbin_ping_missing_logged:   bool  = False  # log missing ping only once per session
-		self._nightly_broad_scan_last:    float = 0.0   # timestamp of last automatic nightly broad scan
+		# Timestamp of last automatic nightly broad scan — persisted in pluginPrefs
+		# so a plugin reload does not reset it (otherwise every restart after
+		# 02:00 triggered an immediate "nightly" scan).
+		try:
+			self._nightly_broad_scan_last: float = float(self.pluginPrefs.get("nightlyBroadScanLast", 0) or 0)
+		except (TypeError, ValueError):
+			self._nightly_broad_scan_last: float = 0.0
 		# Offline requests queued by background threads (e.g. ghost removal) for
 		# the main Indigo thread (runConcurrentThread) to process via IPC.
 		# Each entry: (dev_id, mac, ip, source)
@@ -735,7 +752,8 @@ class Plugin(indigo.PluginBase):
 		# Timestamp of the last successful ARP-cache flush (sudo arp -d -a).
 		# When recent, arp -a entries are fresh ARP replies and count as alive
 		# (sleeping iPhones answer ARP in the Wi-Fi chip but ignore ICMP/TCP).
-		self._last_arp_flush_ts: float = 0.0
+		self._last_arp_flush_ts:      float = 0.0
+		self._arp_flush_fail_logged:  bool  = False
 
 		# Resolved executable paths — set to canonical defaults here; _check_executables()
 		# overwrites with the shutil.which()-discovered path at startup if it differs.
@@ -771,7 +789,7 @@ class Plugin(indigo.PluginBase):
 			if writeToLog:
 				self.indiLOG.log(20, f"debug areas: {self.logAreas}")
 		except Exception as e:
-			if f"{e}".find("None") == -1: self.indiLOG.log(40, "", exc_info=True)
+			if not _benign_ipc_error(e): self.indiLOG.log(40, "", exc_info=True)
 
 	###----------------------------------------------------------###
 	def decideMyLog(self, msgLevel):
@@ -785,7 +803,7 @@ class Plugin(indigo.PluginBase):
 			if msgLevel == "" and "All" not in self.logAreas: return False
 			if msgLevel in self.logAreas: return True
 		except Exception as e:
-			if f"{e}".find("None") == -1: self.indiLOG.log(40, "", exc_info=True)
+			if not _benign_ipc_error(e): self.indiLOG.log(40, "", exc_info=True)
 		return False
 
 	###----------------------------------------------------------###
@@ -824,6 +842,35 @@ class Plugin(indigo.PluginBase):
 	# ------------------------------------------------------------------
 	# Offline watchdog
 	# ------------------------------------------------------------------
+
+	###----------------------------------------------------------###
+	def _arp_liveness_check(self, ip: str, mac: str) -> bool:
+		"""Last-resort liveness probe via ARP for devices that ignore ICMP/TCP.
+
+		Sleeping iPhones answer ARP requests in the Wi-Fi chip (ARP offload)
+		while iOS ignores ICMP and TCP.  Force a fresh ARP resolution and verify
+		the cache entry carries the device's OWN MAC — a proxy-ARP router would
+		answer with its own MAC, so a match proves the device is present.
+		When the sudo password is configured the cache entry is deleted first,
+		making the check authoritative (no stale-cache false positives).
+		"""
+		if not ip or not mac:
+			return False
+		try:
+			pw = self.pluginPrefs.get("sudoPassword", "").strip()
+			if pw:
+				subprocess.run(
+					f"echo {shlex.quote(pw)} | sudo -S {self._exe_arp} -d {shlex.quote(ip)}",
+					shell=True, timeout=3,
+					stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+			_ping(ip, timeout=1.0)          # any IP packet forces an ARP resolution
+			res = subprocess.run([self._exe_arp, "-n", ip],
+				stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=3, text=True)
+			m = re.search(r'\bat\s+([0-9a-f]{1,2}(?::[0-9a-f]{1,2}){5})\b',
+				res.stdout, re.IGNORECASE)
+			return bool(m) and _normalize_mac(m.group(1)) == _normalize_mac(mac)
+		except Exception:
+			return False
 
 	###----------------------------------------------------------###
 	def _offline_watchdog(self):
@@ -869,18 +916,37 @@ class Plugin(indigo.PluginBase):
 					# Use cache — avoids an IPC round-trip for every online device every 15 s
 					if not self._cache_enabled(dev_id):
 						continue   # device disabled in Indigo — skip offline check
-					dev_thresh = int(self._cache_props(dev_id).get("offlineThreshold", 0) or 0)
+					_wprops = self._cache_props(dev_id)
+					# Modes where the PROBE path owns the offline decision (confirm
+					# ping, both/offline streak logic, pingOnly timers): the watchdog
+					# must not preempt them with a bare timeout, otherwise the
+					# confirm-ping never gets a chance to run before the device is
+					# marked offline.  _check_all_devices runs every 15 s and makes
+					# the offline decision for these modes itself.
+					if _wprops.get("pingMode", "confirm") in ("confirm", "both", "offline", "pingOnly"):
+						continue
+					dev_thresh = int(_wprops.get("offlineThreshold", 0) or 0)
 					if dev_thresh > 0:
 						threshold = dev_thresh
 
 				if now - last_seen > threshold:
 					with self._known_lock:
-						self._known[mac]["online"] = False
+						cur = self._known.get(mac)
+						if cur is None:
+							continue
+						# Re-validate against the LIVE entry before committing: the
+						# sniff/sweep threads run concurrently and may have refreshed
+						# last_seen after this loop's snapshot was taken.  Committing
+						# on snapshot data caused devices to be marked offline seconds
+						# AFTER a sighting (stale-snapshot race).
+						if time.time() - cur.get("last_seen", last_seen) <= threshold:
+							continue   # sighting arrived while this pass was running
+						cur["online"] = False
 						# Reset the probe timer so the very next _check_all_devices
 						# call fires a recovery ping immediately, rather than waiting
 						# for the online-interval timer (ping_only_next_probe = now+60)
 						# that was set during the last successful online probe.
-						self._known[mac]["ping_only_next_probe"] = 0
+						cur["ping_only_next_probe"] = 0
 					self._update_indigo_device(mac, entry.get("ip", ""), False,
 					                           source="timeout")
 
@@ -1089,7 +1155,7 @@ class Plugin(indigo.PluginBase):
 		self._backfill_history_from_devices()
 		#self.indiLOG.log(20, f"startup: backfill done ")
 		self._start_threads()
-		self.indiLOG.log(20, f"Network Scanner active")
+		self.indiLOG.log(10, f"Network Scanner active")
 
 	###----------------------------------------------------------###
 	def _getPrefixName(self):
@@ -1593,7 +1659,7 @@ class Plugin(indigo.PluginBase):
 			if backfill:
 				dev.updateStatesOnServer(backfill)
 		except Exception as e:
-			if f"{e}".find("None") == -1:
+			if not _benign_ipc_error(e):
 				self.indiLOG.log(30, f"Backfill states failed for {dev.name}: {e}")
 
 		# Launch a port scan for this device in the background.
@@ -1883,7 +1949,7 @@ class Plugin(indigo.PluginBase):
 							if changed:
 								d.replaceOnServer()
 						except Exception as _e:
-							if f"{_e}".find("None") == -1:
+							if not _benign_ipc_error(_e):
 								self.indiLOG.log(30, f"Could not update Notes: {_e}")
 					threading.Thread(target=_deferred_notes, args=(_did, _new_note, _new_addr),
 					                 daemon=True, name=f"NS-Notes-{devId}").start()
@@ -1967,7 +2033,7 @@ class Plugin(indigo.PluginBase):
 				self._recalc_group_device(dev)
 
 		except Exception as e:
-			if f"{e}".find("None") == -1:
+			if not _benign_ipc_error(e):
 				self.indiLOG.log(30, f"Could not update states for device {devId}: {e}")
 
 	# ------------------------------------------------------------------
@@ -1993,7 +2059,7 @@ class Plugin(indigo.PluginBase):
 				target=self._sniff_loop, args=(iface, password), daemon=True, name="NS-Sniff"
 			)
 			self._sniff_thread.start()
-			self.indiLOG.log(20, f"traffic sniffer (tcpdump) started on {iface}")
+			self.indiLOG.log(10, f"traffic sniffer (tcpdump) started on {iface}")
 		else:
 			self.indiLOG.log(20, "Passive ARP sniffing disabled.")
 
@@ -2001,19 +2067,19 @@ class Plugin(indigo.PluginBase):
 			target=self._dhcp_sniff_loop, args=(iface, password), daemon=True, name="NS-DHCP"
 		)
 		self._dhcp_thread.start()
-		self.indiLOG.log(20, "DHCP passive sniffer started.")
+		self.indiLOG.log(10, "DHCP passive sniffer started.")
 
 		self._mdns_thread = threading.Thread(
 			target=self._mdns_browse_loop, daemon=True, name="NS-mDNS"
 		)
 		self._mdns_thread.start()
-		self.indiLOG.log(20, "mDNS browse loop started.")
+		self.indiLOG.log(10, "mDNS browse loop started.")
 
 		self._scan_thread = threading.Thread(
 			target=self._scan_loop, args=(iface, sweep_on), daemon=True, name="NS-Scan"
 		)
 		self._scan_thread.start()
-		self.indiLOG.log(20, "Device scan loop started.")
+		self.indiLOG.log(10, "Device scan loop started.")
 
 		# ── Secondary interface threads (only when networkInterface2 is set) ──
 		if iface2:
@@ -2023,7 +2089,7 @@ class Plugin(indigo.PluginBase):
 					daemon=True, name="NS-Sniff2"
 				)
 				self._sniff_thread2.start()
-				self.indiLOG.log(20, f"traffic sniffer (tcpdump) started on {iface2} [secondary]")
+				self.indiLOG.log(10, f"traffic sniffer (tcpdump) started on {iface2} [secondary]")
 
 			self._dhcp_thread2 = threading.Thread(
 				target=self._dhcp_sniff_loop, args=(iface2, password, True),
@@ -2058,7 +2124,7 @@ class Plugin(indigo.PluginBase):
 		threading.Thread(
 			target=self._offline_watchdog, daemon=True, name="NS-OfflineWatchdog"
 		).start()
-		self.indiLOG.log(20, "Offline watchdog started.")
+		self.indiLOG.log(10, "Offline watchdog started.")
 
 	###----------------------------------------------------------###
 	def _save_loop(self):
@@ -2094,7 +2160,7 @@ class Plugin(indigo.PluginBase):
 		If password is set, tcpdump is launched via  echo <pw> | sudo -S tcpdump …
 		so that it can open the raw network socket without granting Indigo full root.
 		"""
-		self.indiLOG.log(20, f"_sniff_loop started  iface={iface}  sudo={'yes' if password else 'no'}")
+		self.indiLOG.log(10, f"_sniff_loop started  iface={iface}  sudo={'yes' if password else 'no'}")
 		# ARP Reply: tcpdump -n -e without -v outputs ": Reply 1.2.3.4 is-at aa:bb:cc:dd:ee:ff"
 		# (no leading "ARP," prefix).  \b matches both the verbose and non-verbose format.
 		_arp_reply_re = re.compile(
@@ -2121,7 +2187,8 @@ class Plugin(indigo.PluginBase):
 				return
 			# Use cache — this inner function is called for every captured packet
 			if self._cache_props(dev_id).get("logSeenToFile", False):
-				self.indiLOG.log(10, f"tcpdump [{iface}]  [{mac}]: {line}")
+				_dn = self._cache_name(dev_id) or mac
+				self.indiLOG.log(10, f"{_dn} raw traffic [{iface}]: {line}")
 
 		# Targeted BPF filter: capture only frame types that signal device presence.
 		# ARP covers discovery and IP changes; mDNS (5353) catches Apple/IoT/Chromecast;
@@ -2140,7 +2207,7 @@ class Plugin(indigo.PluginBase):
 				else:
 					shell_cmd = f"{self._exe_tcpdump} -i {iface} -n -e -l '{_BPF}'"
 				log_cmd = shell_cmd.replace(shlex.quote(password), "***") if password else shell_cmd
-				self.indiLOG.log(20, f"tcpdump launch: {log_cmd}")
+				self.indiLOG.log(10, f"tcpdump launch: {log_cmd}")
 				proc = subprocess.Popen(
 					shell_cmd, shell=True,
 					stdout=subprocess.PIPE,
@@ -2356,7 +2423,7 @@ class Plugin(indigo.PluginBase):
 					pass
 
 			except Exception as e:
-				if f"{e}".find("None") == -1: self.indiLOG.log(40, f"Sniff error: {e}", exc_info=True)
+				if not _benign_ipc_error(e): self.indiLOG.log(40, f"Sniff error: {e}", exc_info=True)
 			finally:
 				self._kill_tcpdump()
 
@@ -2692,7 +2759,8 @@ class Plugin(indigo.PluginBase):
 			return
 
 		while not self._stop_event.is_set():
-			interval = int(self.pluginPrefs.get("scanInterval", kDefaultPluginPrefs["scanInterval"]))
+			interval     = int(self.pluginPrefs.get("scanInterval", kDefaultPluginPrefs["scanInterval"]))
+			_cycle_start = time.time()
 
 			if sweep_enabled:
 				self._arp_sweep(iface)
@@ -2709,6 +2777,7 @@ class Plugin(indigo.PluginBase):
 				and (_now_ts - self._nightly_broad_scan_last) >= _BROAD_SCAN_INTERVAL
 			):
 				self._nightly_broad_scan_last = _now_ts
+				self.pluginPrefs["nightlyBroadScanLast"] = str(_now_ts)
 				threading.Thread(
 					target=self._broad_port_scan_worker,
 					kwargs={"quiet": True},
@@ -2721,9 +2790,17 @@ class Plugin(indigo.PluginBase):
 			# rather than being throttled to the much longer scan interval.
 			# Per-device ping_only_next_probe gates and the sweep-freshness check
 			# already prevent any redundant work for non-pingOnly devices.
+			#
+			# The idle budget subtracts the time the sweep/probe work already
+			# consumed, so scanInterval is a TRUE cycle period (sweep start to
+			# sweep start) — not an idle gap added on top of 30-60 s of work.
+			# A floor of _PING_ONLY_INTERVAL_OFFLINE keeps a minimum idle window
+			# so back-to-back sweeps can never hammer the network.
+			work_secs   = time.time() - _cycle_start
+			idle_budget = max(interval - work_secs, float(_PING_ONLY_INTERVAL_OFFLINE))
 			elapsed = 0
 			while not self._stop_event.is_set():
-				remaining = interval - elapsed
+				remaining = idle_budget - elapsed
 				if remaining <= 0:
 					break
 				sleep_secs = min(_PING_ONLY_INTERVAL_OFFLINE, remaining)
@@ -2733,7 +2810,7 @@ class Plugin(indigo.PluginBase):
 						break
 					time.sleep(0.2)
 				elapsed += sleep_secs
-				if not self._stop_event.is_set() and elapsed < interval:
+				if not self._stop_event.is_set() and elapsed < idle_budget:
 					self._check_all_devices(iface)
 
 	###----------------------------------------------------------###
@@ -2752,9 +2829,12 @@ class Plugin(indigo.PluginBase):
 		if self._stop_event.is_set():
 			return
 		while not self._stop_event.is_set():
-			interval = int(self.pluginPrefs.get("scanInterval", kDefaultPluginPrefs["scanInterval"]))
+			interval     = int(self.pluginPrefs.get("scanInterval", kDefaultPluginPrefs["scanInterval"]))
+			_cycle_start = time.time()
 			self._arp_sweep(iface)
-			steps = int(interval / 0.2)
+			# True cycle period: subtract sweep duration, keep a minimum idle window
+			_idle = max(interval - (time.time() - _cycle_start), float(_PING_ONLY_INTERVAL_OFFLINE))
+			steps = int(_idle / 0.2)
 			for _ in range(steps):
 				if self._stop_event.is_set():
 					break
@@ -3329,12 +3409,23 @@ class Plugin(indigo.PluginBase):
 					)
 					_flush_res = subprocess.run(
 						_flush_cmd, shell=True, timeout=5,
-						stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+						stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
 					)
-					if _flush_res.returncode == 0:
+					_flush_out = (_flush_res.stdout or b"").decode("utf-8", errors="replace")
+					# macOS arp -d -a can exit non-zero even though it deleted most
+					# entries (some refuse deletion) — count any "deleted" output as
+					# success, otherwise the sleeping-device ARP path never activates.
+					if _flush_res.returncode == 0 or "deleted" in _flush_out:
 						self._last_arp_flush_ts = time.time()
-					if self.decideMyLog("Sweep"):
-						self.indiLOG.log(10, "ARP cache flushed (arp -d -a)")
+						if self.decideMyLog("Sweep"):
+							self.indiLOG.log(10, "ARP cache flushed (arp -d -a)")
+					elif not self._arp_flush_fail_logged:
+						self._arp_flush_fail_logged = True
+						self.indiLOG.log(30,
+							f"ARP cache flush FAILED (rc={_flush_res.returncode}): "
+							f"{_flush_out.strip()[:200]!r} — sleeping-device ARP detection "
+							f"(\"replied to ARP only\") stays disabled until this works; "
+							f"check the sudo password in the plugin config")
 				except Exception:
 					pass   # best-effort — failure is silent
 
@@ -3375,7 +3466,7 @@ class Plugin(indigo.PluginBase):
 				except Exception:
 					pass
 		except Exception as e:
-			if f"{e}".find("None") == -1: self.indiLOG.log(40, f"ARP sweep error: {e}", exc_info=True)
+			if not _benign_ipc_error(e): self.indiLOG.log(40, f"ARP sweep error: {e}", exc_info=True)
 
 	###----------------------------------------------------------###
 	def _check_all_devices(self, iface: str):
@@ -3774,6 +3865,10 @@ class Plugin(indigo.PluginBase):
 
 			silent_secs = now - last_seen
 			timed_out   = silent_secs > offline_threshold
+			# confirm mode is a LAST GATE: it runs only after the ARP/sniff timeout
+			# has already declared the device off, and can only rescue (veto) that
+			# verdict — it never causes an early off.
+			confirm_due = (ping_mode == "confirm" and timed_out)
 
 			if ping_mode == "none":
 				# No active pinging — offline is decided purely by ARP timeout.
@@ -3796,6 +3891,7 @@ class Plugin(indigo.PluginBase):
 			# correct 60 s / 15 s interval when _check_all_devices runs mid-cycle.
 			if (sweep_enabled
 					and not ping_only
+					and not timed_out
 					and entry.get("online", True)
 					and silent_secs < max(sweep_interval - _SWEEP_FRESHNESS_MARGIN, 5)):
 				with results_lock:
@@ -3823,7 +3919,8 @@ class Plugin(indigo.PluginBase):
 			# For other active ping modes, when onlineCheckInterval is set, gate
 			# online probes via online_check_next_probe so the mid-cycle
 			# _check_all_devices calls don't ping a stable device every 15 s.
-			if not was_offline and online_check_interval > 0 and ping_mode != "_pingOnly":
+			if (not was_offline and online_check_interval > 0 and ping_mode != "_pingOnly"
+					and not timed_out and not confirm_due):
 				next_online_probe = entry.get("online_check_next_probe", 0)
 				if now < next_online_probe:
 					with results_lock:
@@ -3941,7 +4038,7 @@ class Plugin(indigo.PluginBase):
 			# Ping success resets the clock (keeps device online).
 			# Ping failure increments streak; offline when streak >= missed_needed.
 			if ping_mode == "confirm":
-				if not timed_out:
+				if not confirm_due:
 					# ARP still recent — no need to ping, preserve current state
 					with results_lock:
 						results[mac] = (entry.get("online", True), last_seen, 0)
@@ -3953,6 +4050,14 @@ class Plugin(indigo.PluginBase):
 				# checks ineffective.  TCP is never proxied, so a TCP failure is a
 				# reliable indicator that the device is genuinely offline.
 				ping_ok = _do_probe(ip, mac, entry, ping_only=ping_only, was_offline=True)
+				if not ping_ok:
+					# ICMP/TCP dead — final ARP liveness check: sleeping iPhones
+					# answer ARP in the Wi-Fi chip while ignoring ICMP and TCP.
+					ping_ok = self._arp_liveness_check(ip, mac)
+					if ping_ok and log_ping:
+						self.indiLOG.log(10,
+							f"Confirm: ICMP/TCP failed but ARP answered — "
+							f"{names_by_mac.get(mac, mac)} ({ip}) kept ONLINE")
 				if ping_ok:
 					new_streak    = 0
 					online        = True
@@ -3966,7 +4071,8 @@ class Plugin(indigo.PluginBase):
 						)
 				else:
 					new_streak    = current_streak + 1
-					online        = new_streak < missed_needed   # stay online until streak fills
+					# Ping failed — the timeout verdict stands once the streak fills.
+					online        = new_streak < missed_needed
 					new_last_seen = last_seen
 				with self._known_lock:
 					_known_mac = self._known.setdefault(mac, {})
@@ -4078,13 +4184,26 @@ class Plugin(indigo.PluginBase):
 
 		for mac, (online, new_last_seen, new_streak) in results.items():
 			with self._known_lock:
-				self._known[mac]["online"]           = online
-				self._known[mac]["last_seen"]        = new_last_seen
-				self._known[mac]["ping_fail_streak"] = new_streak
+				_live      = self._known.setdefault(mac, {})
+				_live_seen = _live.get("last_seen", 0)
+				# A sighting that arrived WHILE the probe pass was running overrides
+				# an offline verdict.  new_last_seen carries the last_seen value the
+				# verdict was based on (read into a local at pass start) — if the
+				# live entry has moved past it, the device WAS seen during the pass.
+				# NOTE: snapshot[mac] cannot serve as the stale reference — dict()
+				# is a shallow copy, so snapshot[mac] IS the live entry object.
+				if not online and _live_seen > new_last_seen:
+					online     = True
+					new_streak = 0
+				# last_seen must never move backwards: the sniff/sweep threads may
+				# have written a newer value during the pass.
+				_live["online"]           = online
+				_live["last_seen"]        = max(new_last_seen, _live_seen)
+				_live["ping_fail_streak"] = new_streak
 				# Read IP from live _known — _check_one may have populated it from
 				# the Indigo ipNumber state for devices with no ARP/sniff history.
 				# Fall back to the pre-probe snapshot only when _known has nothing.
-				ip = self._known[mac].get("ip", "") or snapshot[mac].get("ip", "")
+				ip = _live.get("ip", "") or snapshot[mac].get("ip", "")
 			# Use the device ID from the snapshot (consistent with what _check_one
 			# probed), not from the live _known which a concurrent ARP/sniff thread
 			# may have just updated to a different device with the same MAC.
@@ -4297,7 +4416,7 @@ class Plugin(indigo.PluginBase):
 				dev.updateStatesOnServer(_u1)
 				self._cache_patch_states(dev.id, _u1)   # keep cache in sync
 			except Exception as e:
-				if f"{e}".find("None") == -1:
+				if not _benign_ipc_error(e):
 					self.indiLOG.log(30, f"Group device state update failed for {dev.name}: {e}")
 
 		# ── Call 2: count + participants states ─────────────────────────────
@@ -4383,7 +4502,7 @@ class Plugin(indigo.PluginBase):
 					dev.replaceOnServer()
 					self._cache_set_description(dev.id, _desc)
 			except Exception as e:
-				if f"{e}".find("None") == -1:
+				if not _benign_ipc_error(e):
 					self.indiLOG.log(30, f"Could not update address/notes for {dev.name}: {e}")
 
 	###----------------------------------------------------------###
@@ -4683,7 +4802,7 @@ class Plugin(indigo.PluginBase):
 				dev.updateStatesOnServer(updates)
 				self._cache_patch_states(dev.id, updates)
 			except Exception as e:
-				if f"{e}".find("None") == -1:
+				if not _benign_ipc_error(e):
 					self.indiLOG.log(30, f"External device state update failed for {self._cache_name(dev.id)}: {e}")
 
 		# ── Update aggregate ONLINE group devices ──────────────────────────
@@ -4898,7 +5017,10 @@ class Plugin(indigo.PluginBase):
 
 		# Global "seen" flag → Indigo event log (level 20)
 		if self.decideMyLog("Seen") or log_seen_to_file:
-			self.indiLOG.log(10, f"Seen: {mac}  IP={ip}  vendor={entry['vendor']}")
+			_dn = ((self._cache_name(dev_id) if dev_id else "")
+			       or entry.get("local_name", "") or entry.get("name", "") or "new device")
+			self.indiLOG.log(10,
+				f"{_dn} detected:  {mac}  IP={ip}  vendor={entry['vendor']}  via {source}")
 
 		# IP-change log — honoured unless suppressed for this device
 		if changed_ip and old_ip and self.decideMyLog("IpChange") and not suppress_ip_log:
@@ -5104,15 +5226,15 @@ class Plugin(indigo.PluginBase):
 						_create_kwargs["folder"] = _var_folder_id
 					indigo.variable.create(_var_name, **_create_kwargs)
 				except Exception as ve:
-					if f"{ve}".find("None") == -1:
+					if not _benign_ipc_error(ve):
 						self.indiLOG.log(30, f"Could not create variable {_var_name}: {ve}")
 			except Exception as ve:
-				if f"{ve}".find("None") == -1:
+				if not _benign_ipc_error(ve):
 					self.indiLOG.log(30, f"Could not update variable {_var_name}: {ve}")
 
 			return new_dev
 		except Exception as e:
-			if f"{e}".find("None") == -1: self.indiLOG.log(40, f"Failed to create device for {mac}: {e}", exc_info=True)
+			if not _benign_ipc_error(e): self.indiLOG.log(40, f"Failed to create device for {mac}: {e}", exc_info=True)
 			return None
 
 	###----------------------------------------------------------###
@@ -5169,7 +5291,10 @@ class Plugin(indigo.PluginBase):
 
 		dev_name = self._cache_name(dev_id)
 
-		if online_changed and self.decideMyLog("StateChange"):
+		# Per-device log flag (logSeenToFile) also prints the ON/OFF decision for
+		# this device — independent of the global StateChange debug option.
+		_dev_log_onoff = bool(self._cache_props(dev_id).get("logSeenToFile", False))
+		if online_changed and (self.decideMyLog("StateChange") or _dev_log_onoff):
 			status = "ONLINE" if online else "OFFLINE"
 			if not online:
 				entry         = self._known.get(mac, {})
@@ -5181,7 +5306,8 @@ class Plugin(indigo.PluginBase):
 			else:
 				suffix  = ""
 				src_str = f"  via {source}" if source else ""
-			self.indiLOG.log(10, f"{dev_name} ({ip}) is now {status}{suffix}{src_str}")
+			self.indiLOG.log(20 if _dev_log_onoff else 10,
+				f"{dev_name} ({ip}) is now {status}{suffix}{src_str}")
 
 		# Detailed trace for any device that matches debugTrackedDevice
 		self._trace_log(mac, ip, "_state_update",
@@ -5289,11 +5415,11 @@ class Plugin(indigo.PluginBase):
 						dev.replaceOnServer()
 						self._cache_set_description(dev_id, _note_val)
 					except Exception as _re:
-						if f"{_re}".find("None") == -1:
+						if not _benign_ipc_error(_re):
 							self.indiLOG.log(30, f"replaceOnServer failed for {dev_name}: {_re}")
 
 		except Exception as e:
-			if f"{e}".find("None") == -1: self.indiLOG.log(40, f"State update failed for {dev_name}: {e}", exc_info=True)
+			if not _benign_ipc_error(e): self.indiLOG.log(40, f"State update failed for {dev_name}: {e}", exc_info=True)
 
 		# ── Update aggregate HOME_AWAY group devices ──────────────────────
 		if online_changed and prev_online is not None:
@@ -5425,7 +5551,7 @@ class Plugin(indigo.PluginBase):
 					_create_kwargs["folder"] = _folder_id
 				indigo.variable.create(_var_name, **_create_kwargs)
 			except Exception as ve:
-				if f"{ve}".find("None") == -1:
+				if not _benign_ipc_error(ve):
 					self.indiLOG.log(30, f"Could not create variable {_var_name}: {ve}")
 
 	###----------------------------------------------------------###
@@ -6532,7 +6658,7 @@ class Plugin(indigo.PluginBase):
 					kwargs["folder"] = folder_id
 				indigo.variable.create(var_name, **kwargs)
 		except Exception as e:
-			if f"{e}".find("None") == -1:
+			if not _benign_ipc_error(e):
 				self.indiLOG.log(30, f"Could not update variable {var_name}: {e}")
 
 	###----------------------------------------------------------###
@@ -6915,7 +7041,7 @@ MENU ITEMS  (Plugins -> Network Scanner)
 			) if merged_ports else ""
 			dev.updateStateOnServer("openPorts", value=port_str)
 		except Exception as e:
-			if f"{e}".find("None") == -1:
+			if not _benign_ipc_error(e):
 				self.indiLOG.log(30, f"Port scan update failed for device {dev_id}: {e}")
 
 	###----------------------------------------------------------###
@@ -7023,6 +7149,22 @@ MENU ITEMS  (Plugins -> Network Scanner)
 
 			# Ports that are genuinely new (not already in openPorts state)
 			new_ports    = [p for p in found_sorted if p not in prev_open_set]
+
+			# Persist the merge back into openPorts (cumulative, same rules as
+			# _port_scan_device) — without this the same ports were reported as
+			# ++++ new ++++ on every scan, forever.
+			if dev_id and new_ports:
+				try:
+					_dev      = indigo.devices[dev_id]
+					_merged   = sorted(prev_open_set | set(found_sorted))
+					_port_str = ", ".join(
+						f"{p}/{_SCAN_PORTS[p][0]}" for p in _merged if p in _SCAN_PORTS
+					)
+					_dev.updateStateOnServer("openPorts", value=_port_str)
+					self._cache_patch_states(dev_id, [{"key": "openPorts", "value": _port_str}])
+				except Exception as _pe:
+					if not _benign_ipc_error(_pe):
+						self.indiLOG.log(30, f"openPorts update failed for {dev_name}: {_pe}")
 
 			# Best port for curlPort: first new port, then first found, else keep previous
 			best_port   = new_ports[0] if new_ports else (found_sorted[0] if found_sorted else None)
@@ -7447,7 +7589,7 @@ MENU ITEMS  (Plugins -> Network Scanner)
 			valuesDict["oldValue"] = new_value
 			valuesDict["MSG"]      = f"Done — {dev.name}.{state_name} = {new_value!r}"
 		except Exception as e:
-			if f"{e}".find("None") == -1:
+			if not _benign_ipc_error(e):
 				self.indiLOG.log(40, f"setDevState error: {e}", exc_info=True)
 			valuesDict["MSG"] = f"Error: {e}"
 		return valuesDict
@@ -7466,7 +7608,7 @@ MENU ITEMS  (Plugins -> Network Scanner)
 				dev.replaceOnServer()
 				self.indiLOG.log(20, f"Renamed device to '{safe_name}'")
 			except Exception as e:
-				if f"{e}".find("None") == -1: self.indiLOG.log(40, f"Rename failed: {e}", exc_info=True)
+				if not _benign_ipc_error(e): self.indiLOG.log(40, f"Rename failed: {e}", exc_info=True)
 		else:
 			self.indiLOG.log(20, f"No vendor info for {dev.name}; rename skipped.")
 

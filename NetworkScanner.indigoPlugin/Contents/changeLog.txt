@@ -1,6 +1,187 @@
  Network Scanner – Indigo Plugin
 Change Log
 ================================================================================
+Version 2026.5.71 (2026-07-08)
+
+1. OFFLINE 9 s after a sighting, again (reported 00:08:02 vs sighting
+     00:07:53): the v2026.5.67 cancel-guard compared the live entry
+     against snapshot[mac] - but dict(self._known) is a SHALLOW copy,
+     so snapshot[mac] IS the live entry object and the comparison could
+     never trigger.  The guard now compares against the last_seen value
+     the offline verdict was actually based on (carried in the results
+     tuple), so any sighting that arrives during the probe pass reliably
+     cancels the verdict.
+     Root cause of the observed event: the ARP reply at 00:07:53 was the
+     phone answering the confirm gate's OWN ARP-liveness ping; the
+     concurrent sweep flushed the ARP cache in the same instant, so the
+     liveness check read an empty cache and reported dead.  The tcpdump
+     capture of that same reply now cancels the false verdict.
+
+================================================================================
+Version 2026.5.70 (2026-07-08)
+
+1. scanInterval is now a TRUE sweep period (sweep start to sweep start):
+     both scan loops previously slept the full scanInterval AFTER the
+     sweep + probe work finished, so with 30-60 s of work per cycle a
+     "60 s" setting produced sweeps only every ~2 minutes - widening the
+     worst-case detection gap accordingly.  The idle sleep now subtracts
+     the work time already spent, with a 15 s minimum idle window so
+     back-to-back sweeps can never hammer the network.  Applies to the
+     primary and the secondary-interface loop.
+
+================================================================================
+Version 2026.5.69 (2026-07-07)
+
+1. Confirm mode reverted to pure last-gate semantics (design decision):
+     the ARP/sniff timeout alone declares the device off; the confirm
+     ping runs only AFTER that verdict and can only rescue (veto) it -
+     it never probes early and never causes an off by itself.  The 10 s
+     pre-probe window from v2026.5.63 is removed; the ARP-liveness
+     fallback and the watchdog deference remain.
+
+================================================================================
+Version 2026.5.68 (2026-07-07)
+
+1. Sleeping-device ARP detection silently inactive (reported: with
+     scanInterval=60 the sweep only registered the iPhone when it was
+     awake - no "ARP reply (sweep)" sightings at all):
+     the v2026.5.57 ARP-alive path only activates after a SUCCESSFUL
+     arp -d -a cache flush, judged strictly by exit code 0.  macOS
+     arp -d -a frequently exits non-zero even though it deleted most
+     entries (some entries refuse deletion), and the failure was
+     swallowed silently - so the feature never switched on.
+     The flush now counts as successful when the output shows deleted
+     entries regardless of exit code, and a genuine failure is logged
+     once per session as a WARNING naming the fix (sudo password).
+
+================================================================================
+Version 2026.5.67 (2026-07-07)
+
+1. Probe pass stale-snapshot race (reported: OFFLINE at 22:55:26 with
+     the log line itself showing "last seen: 22:55:21 = 209s ago" - a
+     self-contradiction): _check_all_devices computed its offline
+     verdicts from a snapshot taken at the start of the pass and then
+     committed them, OVERWRITING last_seen backwards and ignoring
+     sightings that the sniff/sweep threads registered while the pass
+     (probe + ARP fallback, up to ~30 s) was running.  Same class of
+     bug as the watchdog race fixed in v2026.5.59.  The commit now
+     re-checks the live entry under the lock: a sighting newer than
+     the snapshot cancels the offline verdict, and last_seen can never
+     move backwards.
+
+================================================================================
+Version 2026.5.66 (2026-07-07)
+
+1. Startup chatter demoted from level 20 to level 10 (debug/plugin.log
+     only): "_sniff_loop started", "traffic sniffer (tcpdump) started"
+     (primary + secondary), "tcpdump launch: ...", "DHCP passive sniffer
+     started.", "mDNS browse loop started.", "Device scan loop
+     started.", "Offline watchdog started.", "Network Scanner active".
+     The Indigo event log now only shows the startup banner and real
+     events.
+
+================================================================================
+Version 2026.5.65 (2026-07-07)
+
+1. The per-device raw tcpdump trace line now also leads with the device
+     name:
+       old:  tcpdump [en0]  [5c:ad:ba:1b:db:66]: 22:40:30.123 ...
+       new:  iphone1xprokarl raw traffic [en0]: 22:40:30.123 ...
+     (The MAC is still visible inside the captured line itself.)
+
+================================================================================
+Version 2026.5.64 (2026-07-07)
+
+1. The "Seen: <mac> ..." log line now identifies the device and the
+     detection path:
+       old:  Seen: 5c:ad:ba:1b:db:66  IP=192.168.1.85  vendor=Apple
+       new:  iphone1xprokarl detected:  5c:ad:ba:1b:db:66  IP=192.168.1.85
+             vendor=Apple  via traffic observed (tcpdump)
+     Falls back to the mDNS/ARP hostname or "new device" when no Indigo
+     device exists yet.
+
+================================================================================
+Version 2026.5.63 (2026-07-07)
+
+Confirm-offline mode actually confirms now (reported: device with
+"Confirm offline" went OFFLINE [timeout] with no ping activity at all):
+
+1. The offline watchdog fired at the bare last-seen threshold for EVERY
+     device, regardless of pingMode - so the confirm-ping never got a
+     chance to run.  The watchdog now skips modes where the probe path
+     owns the offline decision (confirm / both / offline / pingOnly);
+     _check_all_devices (every 15 s) makes the call for those.
+
+2. The confirm probe now starts _CONFIRM_PRE_SECS (10 s) BEFORE the
+     threshold expires, so the decision at expiry is based on a real
+     probe result.  An early miss cannot take the device down before
+     the threshold has actually expired.
+
+3. New ARP liveness fallback: when the confirm ICMP/TCP probe fails,
+     the device's ARP is checked directly (cache entry deleted first
+     when the sudo password is set, then a ping forces a fresh ARP
+     resolution, then the cache must show the device's OWN MAC).
+     Sleeping iPhones answer ARP in the Wi-Fi chip while ignoring
+     ICMP and TCP, so this keeps a phone that is home ONLINE even
+     when it fails the classic ping.  Proxy-ARP cannot fake it (a
+     router answers with its own MAC).
+
+4. Gates that could silently defer a due confirm probe (per-device
+     onlineCheckInterval, sweep-freshness skip) now let timed-out /
+     due-for-confirm devices through.
+
+================================================================================
+Version 2026.5.62 (2026-07-07)
+
+1. Per-device logging (logSeenToFile) now also prints the ON/OFF
+     decision for that device (level 20), including the source of the
+     decision (sweep / tcpdump / probe / timeout) and, for OFF, the
+     last-seen timestamp and age.  Previously the decision line was
+     only visible with the global StateChange debug option (level 10).
+
+================================================================================
+Version 2026.5.61 (2026-07-07)
+
+1. "Port Scan Results" ran on every plugin reload: the nightly-scan
+     timestamp lived only in memory, so after a restart the 24 h rate
+     limit was trivially satisfied and (any time after 02:00) the
+     "nightly" quiet scan fired immediately at startup.  The timestamp
+     is now persisted in pluginPrefs ("nightlyBroadScanLast") and
+     survives reloads - the scan really runs once per day now.
+
+2. Broad port scan reported the same ports as "++++ new ++++" forever:
+     the scan compared against the device's openPorts state but never
+     wrote the merge back (only the single-device and slow scans did).
+     Newly found ports are now merged cumulatively into openPorts, so
+     "new" means new.
+
+================================================================================
+Version 2026.5.60 (2026-07-07)
+
+1. "Sniff error: UnexpectedNullError -- CClientMgr not created" ERROR
+     traceback during plugin reload: Indigo's IPC layer raises this when
+     a background thread (sniff/sweep/watchdog) calls the server while
+     the plugin host is being torn down for a restart.  The existing
+     shutdown-noise suppression only matched messages containing "None";
+     all 20 guard sites now use a shared _benign_ipc_error() helper that
+     also recognises the CClientMgr / UnexpectedNull variants.  Harmless
+     noise - no functional change.
+
+================================================================================
+Version 2026.5.59 (2026-07-07)
+
+1. Offline watchdog stale-snapshot race (reported: device marked OFF at
+     21:12:01 although a sighting was logged at 21:11:53):
+     the watchdog takes a snapshot of _known at the start of each 15 s
+     pass and committed timeout-offline decisions from that snapshot.
+     Sightings registered by the sniff/sweep threads DURING the pass
+     (which can stretch to many seconds due to per-device Indigo IPC)
+     were ignored, so a device could go offline right after it was seen.
+     The watchdog now re-reads the live entry under the lock immediately
+     before committing and aborts the OFF if last_seen was refreshed in
+     the meantime.
+
+================================================================================
 Version 2026.5.58 (2026-07-07)
 
 1. vendor=Unknown was cached forever: the OUI lookup ran exactly once
