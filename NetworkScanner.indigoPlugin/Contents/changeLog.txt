@@ -1,6 +1,28 @@
  Network Scanner – Indigo Plugin
 Change Log
 ================================================================================
+Version 2026.5.73 (2026-07-08)
+
+1. Removed the decade-old error filter that suppressed any exception
+     whose message contains "None" (all 21 guard sites).  It was hiding
+     genuine NoneType bugs - including whatever has been silently
+     aborting the ARP sweep mid-cycle on every pass.  Only true Indigo
+     reload noise ("UnexpectedNullError -- CClientMgr not created") is
+     still suppressed.  All real errors now log at ERROR level with a
+     traceback.
+
+================================================================================
+Version 2026.5.72 (2026-07-08)
+
+1. Diagnosis aid for the missing ARP-alive metronome: the ARP sweep has
+     been dying mid-cycle with a silently swallowed exception (the
+     benign-IPC filter matches any message containing "None", which also
+     hides genuine NoneType bugs), aborting every sweep BEFORE the cache
+     flush and the sweep-complete summary.  Suppressed sweep errors are
+     now logged at level 10 with full traceback while the plugin is
+     running (shutdown noise stays suppressed).
+
+================================================================================
 Version 2026.5.71 (2026-07-08)
 
 1. OFFLINE 9 s after a sighting, again (reported 00:08:02 vs sighting

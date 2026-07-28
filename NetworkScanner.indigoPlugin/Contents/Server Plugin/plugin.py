@@ -255,14 +255,14 @@ def _strip_local_suffix(name: str) -> str:
 
 
 def _benign_ipc_error(e) -> bool:
-	"""True for errors that are expected noise during plugin shutdown/restart.
-
-	Indigo IPC raises messages containing "None" or "UnexpectedNullError --
-	CClientMgr not created" when a background thread calls the server while
-	the plugin host is being torn down.  Not worth an ERROR-level traceback.
+	"""True only for Indigo IPC teardown noise ("UnexpectedNullError --
+	CClientMgr not created"), raised when a background thread calls the
+	server while the plugin host is being restarted.  Everything else is
+	a real error and must be logged.  (A decade-old filter that suppressed
+	any message containing "None" also hid genuine NoneType bugs — removed.)
 	"""
 	msg = f"{e}"
-	return ("None" in msg) or ("CClientMgr" in msg) or ("UnexpectedNull" in msg)
+	return ("CClientMgr" in msg) or ("UnexpectedNull" in msg)
 
 
 def _normalize_mac(mac: str) -> str:
@@ -3466,7 +3466,8 @@ class Plugin(indigo.PluginBase):
 				except Exception:
 					pass
 		except Exception as e:
-			if not _benign_ipc_error(e): self.indiLOG.log(40, f"ARP sweep error: {e}", exc_info=True)
+			if not _benign_ipc_error(e):
+				self.indiLOG.log(40, f"ARP sweep error: {e}", exc_info=True)
 
 	###----------------------------------------------------------###
 	def _check_all_devices(self, iface: str):
