@@ -1,6 +1,39 @@
  Network Scanner – Indigo Plugin
 Change Log
 ================================================================================
+Version 2026.5.58 (2026-07-07)
+
+1. vendor=Unknown was cached forever: the OUI lookup ran exactly once
+     per MAC.  Devices first seen while the MAC2Vendor table was still
+     downloading (typical right after install) were stored as "Unknown"
+     in known_devices.json and never retried.  The lookup now retries
+     on every registration while the stored vendor is empty/"Unknown"
+     and sticks as soon as a real vendor name is found.
+
+================================================================================
+Version 2026.5.57 (2026-07-07)
+
+1. Sleeping iPhones no longer drop off after a while (presence parity
+     with UniFi / BLE based detection):
+     iPhones in Wi-Fi power-save answer ARP requests in the Wi-Fi chip
+     (ARP offload) but ignore ICMP ping and TCP probes, so after a few
+     minutes of screen-off the sweep saw them only as "in ARP cache but
+     no ping reply" - which was treated as stale and never refreshed
+     last_seen, so the offline timeout eventually fired even though the
+     phone was home.
+     When the ARP cache flush (sudo arp -d -a, needs the sudo password
+     in the plugin config) ran after the previous sweep, every arp -a
+     entry in THIS sweep is a fresh ARP reply - the ping fan-out forces
+     an ARP resolution per IP.  Such entries now count as proof of life
+     ("replied to ARP only" in the sweep log) and refresh last_seen.
+     Proxy-ARP routers cannot fake this: they answer with their OWN MAC,
+     so an entry carrying the client's MAC came from the client itself.
+     "permanent" entries (the arp -s re-seeds for pingOnly devices) are
+     excluded.  Without a recent flush (no sudo password configured)
+     cache entries can be ~20 min stale, so the old conservative
+     treatment is kept - configure the sudo password to enable this.
+
+================================================================================
 Version 2026.5.56 (2026-07-07)
 
 1. Home/Away off-delay never fired (reported: group device never cycles

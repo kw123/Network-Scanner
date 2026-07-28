@@ -48,6 +48,7 @@ _THROTTLE_SECS      = 30.0   # minimum seconds between registrations per MAC
 _STARTUP_WAIT_SECS      =  4     # seconds to wait before first sweep/sniff after startup
 _PROBE_POOL_DEADLINE    =  8     # seconds — ThreadPoolExecutor starting deadline for one probe cycle
 _PROBE_POOL_DEADLINE_MAX = 120   # seconds — upper bound for the adaptive probe deadline (pluginPrefs "probeDeadline")
+_ARP_FLUSH_FRESH_SECS   = 900    # seconds — arp -a entries count as fresh ARP replies this long after a cache flush
 _CURL_USELESS_LIMIT     =  5     # suspend TCP fallback after this many consecutive all-port failures
 _SWEEP_FRESHNESS_MARGIN = 10     # skip probe if device was seen within (sweep_interval - N) seconds
 
@@ -730,6 +731,11 @@ class Plugin(indigo.PluginBase):
 		# HOME_AWAY off-delay: dev_id → timestamp when all participants first went offline.
 		# Cleared immediately if any participant comes back.  Key absent = not pending.
 		self._home_away_pending_off: dict = {}
+
+		# Timestamp of the last successful ARP-cache flush (sudo arp -d -a).
+		# When recent, arp -a entries are fresh ARP replies and count as alive
+		# (sleeping iPhones answer ARP in the Wi-Fi chip but ignore ICMP/TCP).
+		self._last_arp_flush_ts: float = 0.0
 
 		# Resolved executable paths — set to canonical defaults here; _check_executables()
 		# overwrites with the shutil.which()-discovered path at startup if it differs.
@@ -2914,6 +2920,7 @@ class Plugin(indigo.PluginBase):
 			arp_by_mac: dict = {}   # mac → (ip, local_name, responded_flag, proxy_arp_flag)
 			arp_iface:  dict = {}   # mac → network interface name (e.g. "en0", "en1")
 			log_arp_sweep = self.decideMyLog("ArpSweepEntries")
+			static_arp_macs: set = set()   # "permanent" entries (arp -s re-seeds) — never proof of life
 			for line in result.stdout.splitlines():
 				m = arp_re.search(line)
 				if not m:
@@ -2921,6 +2928,8 @@ class Plugin(indigo.PluginBase):
 				raw_name, ip, mac = m.group(1), m.group(2), _normalize_mac(m.group(3))
 				if mac == "ff:ff:ff:ff:ff:ff":
 					continue
+				if "permanent" in line:
+					static_arp_macs.add(mac)
 				# Extract "on enX" interface name — first occurrence per MAC wins
 				if mac not in arp_iface:
 					iface_m = re.search(r'\bon\s+(en\d+)\b', line)
@@ -2970,12 +2979,28 @@ class Plugin(indigo.PluginBase):
 						# Keep current winner but mark as proxy-ARP
 						arp_by_mac[mac] = (cur_ip, cur_name, cur_replied, True)
 
-			seen_n   = 0
-			discov_n = 0
+			# When the ARP cache was flushed after the previous sweep, every entry in
+			# this sweep's arp -a is a FRESH ARP reply (the ping fan-out forces an ARP
+			# resolution per IP).  A reply proves the device is on the network even if
+			# it ignored ICMP/TCP — sleeping iPhones answer ARP via Wi-Fi chip offload
+			# while the OS naps.  Proxy-ARP can't fake this: a router answering for an
+			# absent client uses its OWN MAC, so an entry with the client's MAC is real.
+			# Without a recent flush (no sudo password) entries can be ~20 min stale —
+			# keep the old conservative cache-only treatment in that case.
+			arp_is_fresh = (self._last_arp_flush_ts > 0
+			                and (now - self._last_arp_flush_ts) <= _ARP_FLUSH_FRESH_SECS)
+			seen_n      = 0
+			discov_n    = 0
+			arp_alive_n = 0
 			for mac, (ip, local_name, replied, proxy_arp) in arp_by_mac.items():
 				if replied:
 					self._register_device(mac, ip, local_name=local_name, clear_local_name=proxy_arp and not local_name)
 					seen_n += 1
+				elif arp_is_fresh and mac not in static_arp_macs:
+					self._register_device(mac, ip, local_name=local_name,
+					                      clear_local_name=proxy_arp and not local_name,
+					                      source="ARP reply (sweep)")
+					arp_alive_n += 1
 				else:
 					self._discover_device(mac, ip, local_name=local_name, clear_local_name=proxy_arp and not local_name)
 					discov_n += 1
@@ -3281,7 +3306,8 @@ class Plugin(indigo.PluginBase):
 				self.indiLOG.log(10,
 					f"ARP sweep complete on {net_str}/{cidr}: "
 					f"{seen_n} device(s) replied to ping (online), "
-					f"{discov_n} in ARP cache but no ping reply (likely offline / stale)"
+					+ (f"{arp_alive_n} replied to ARP only (online, e.g. sleeping phones), " if arp_alive_n else "")
+					+ f"{discov_n} in ARP cache but no ping reply (likely offline / stale)"
 					+ (f", {ping_only_n} new ping-only (no ARP)" if ping_only_n else "")
 				)
 
@@ -3301,10 +3327,12 @@ class Plugin(indigo.PluginBase):
 						f"echo {shlex.quote(_arp_flush_password)} | "
 						f"sudo -S {self._exe_arp} -d -a"
 					)
-					subprocess.run(
+					_flush_res = subprocess.run(
 						_flush_cmd, shell=True, timeout=5,
 						stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
 					)
+					if _flush_res.returncode == 0:
+						self._last_arp_flush_ts = time.time()
 					if self.decideMyLog("Sweep"):
 						self.indiLOG.log(10, "ARP cache flushed (arp -d -a)")
 				except Exception:
@@ -4706,7 +4734,9 @@ class Plugin(indigo.PluginBase):
 				if not entry.get("mdns_name"):
 					entry["local_name"]        = local_name
 					entry["local_name_source"] = "arp"
-			if "vendor" not in entry:
+			if not entry.get("vendor") or entry["vendor"] == "Unknown":
+				# Retry while Unknown: first sightings often happen before the OUI
+				# table has finished downloading - do not cache the failure forever.
 				entry["vendor"] = self.get_vendor(mac)
 			self._known[mac] = entry
 		# Ensure an Indigo device exists.  Stale ARP-cache entries are NOT
@@ -4850,7 +4880,9 @@ class Plugin(indigo.PluginBase):
 				if not entry.get("mdns_name"):
 					entry["local_name"]        = local_name
 					entry["local_name_source"] = "arp"
-			if "vendor" not in entry:
+			if not entry.get("vendor") or entry["vendor"] == "Unknown":
+				# Retry while Unknown: first sightings often happen before the OUI
+				# table has finished downloading - do not cache the failure forever.
 				entry["vendor"] = self.get_vendor(mac)
 			self._known[mac] = entry
 
