@@ -78,6 +78,8 @@ _PING_ONLY_NEW_DEVICE_DELAY   = 300   # seconds (5 minutes)
 # Minimum number of consecutive sweeps an IP must be seen without ARP before a
 # synthetic MAC is created — prevents ARP timing glitches from creating devices.
 _PING_ONLY_MIN_SWEEPS         = 5
+_PING_ONLY_VERIFY_MAX_PER_SWEEP = 2   # serial ping-verifications per sweep — a burst once stalled a sweep 12+ min
+_GHOST_IP_TTL                 = 6 * 3600   # seconds a failed-verification ghost IP is remembered (not re-verified)
 
 # ARP timeout — adaptive: starts at MIN, doubles on timeout, capped at MAX (seconds)
 _ARP_TIMEOUT_MIN = 15
@@ -745,6 +747,11 @@ class Plugin(indigo.PluginBase):
 		self._pending_offline_requests:   list  = []
 		self._pending_offline_lock:       object = threading.Lock()
 
+		# Ghost IPs: ip → last failed-verification timestamp.  The router answers
+		# the sweep's fast ping for these empty IPs forever, so without this memory
+		# the same ghosts were re-verified (13 s of pings) every 5 sweeps, endlessly.
+		self._ghost_ips: dict = {}
+
 		# HOME_AWAY off-delay: dev_id → timestamp when all participants first went offline.
 		# Cleared immediately if any participant comes back.  Key absent = not pending.
 		self._home_away_pending_off: dict = {}
@@ -1155,7 +1162,41 @@ class Plugin(indigo.PluginBase):
 		self._backfill_history_from_devices()
 		#self.indiLOG.log(20, f"startup: backfill done ")
 		self._start_threads()
+		# One-time upgrade step — runs ONLY when upgrading to 2026.5.79: seed the
+		# newly added changeToOn/changeToOff states from existing data.  Deferred
+		# so every deviceStartComm has refreshed its state list first.
+		if self._schema_changed and self._plugin_version == "2026.5.79":
+			threading.Thread(target=self._backfill_change_timestamps,
+			                 daemon=True, name="NS-BackfillTs").start()
 		self.indiLOG.log(10, f"Network Scanner active")
+
+	###----------------------------------------------------------###
+	def _backfill_change_timestamps(self):
+		"""One-time upgrade step (2026.5.79): seed empty changeToOn / changeToOff
+		from the current onOffState + lastOnOffChange so the new columns are not
+		blank until the first real transition.  Deferred 30 s so every
+		deviceStartComm has refreshed its device's state list first."""
+		if self._stop_event.wait(30):
+			return
+		filled = 0
+		for dev in indigo.devices.iter(PLUGIN_ID):
+			if dev.deviceTypeId not in (DEVICE_TYPE_ID, EXT_DEVICE_TYPE_ID, HOME_AWAY, ONLINE):
+				continue
+			try:
+				last = dev.states.get("lastOnOffChange", "")
+				if not last:
+					continue
+				key = "changeToOn" if bool(dev.states.get("onOffState", False)) else "changeToOff"
+				if dev.states.get(key, ""):
+					continue   # already has a value — never overwrite
+				dev.updateStateOnServer(key, value=last)
+				self._cache_patch_states(dev.id, [{"key": key, "value": last}])
+				filled += 1
+			except Exception:
+				continue
+		if filled:
+			self.indiLOG.log(20,
+				f"changeToOn/changeToOff seeded from lastOnOffChange for {filled} device(s) (one-time upgrade step)")
 
 	###----------------------------------------------------------###
 	def _getPrefixName(self):
@@ -3134,9 +3175,12 @@ class Plugin(indigo.PluginBase):
 					self._ping_only_pending.pop(_stale_ip, None)
 				self._ping_only_pending.update(cleaned)
 
+				verified_this_sweep = 0
 				for ip in list(responded):
 					if ip in ips_with_mac:
 						continue   # already handled via arp_by_mac
+					if now - self._ghost_ips.get(ip, 0) < _GHOST_IP_TTL:
+						continue   # recently confirmed ghost — skip for hours, no re-verify
 
 					# Check if this IP is tracked under a synthetic MAC already
 					existing_synth = None
@@ -3253,6 +3297,15 @@ class Plugin(indigo.PluginBase):
 					if not self.pluginPrefs.get("syntheticDevicesEnabled", kDefaultPluginPrefs["syntheticDevicesEnabled"]):
 						continue
 
+					# Bound the serial verification work per sweep: each candidate
+					# costs up to ~15 s of pings, and a burst of candidates (e.g.
+					# after an empty/truncated arp -a) once stalled a sweep for
+					# 12+ minutes.  Device creation is rate-limited to one per
+					# interval anyway — the rest stay pending for later sweeps.
+					if verified_this_sweep >= _PING_ONLY_VERIFY_MAX_PER_SWEEP:
+						continue
+					verified_this_sweep += 1
+
 					# Step 2 — verification ping.
 					# Send 3 ICMP probes exactly as a user would from a terminal.
 					# The ARP sweep uses a fast broadcast-like flood that some routers
@@ -3288,9 +3341,10 @@ class Plugin(indigo.PluginBase):
 
 					if not ping_ok:
 						# Ping ran but got no response — confirmed ghost.
-						# Delete from pending permanently so it is never retried.
+						# Delete from pending and remember the IP for _GHOST_IP_TTL.
 						self._ping_only_pending.pop(ip, None)
-						if _DEBUG_PING_ONLY_4:
+						self._ghost_ips[ip] = now
+						if _DEBUG_PING_ONLY_4 or self.decideMyLog("Sweep"):
 							self.indiLOG.log(10,
 								f"Ping-only candidate at {ip}: verification ping failed — discarding (ghost / proxy-ARP false positive)"
 							)
@@ -3323,9 +3377,10 @@ class Plugin(indigo.PluginBase):
 
 					if not ping2_ok:
 						self._ping_only_pending.pop(ip, None)
-						if _DEBUG_PING_ONLY_2:
-							self.indiLOG.log(20,
-								f"Ping-only candidate at {ip}: first ping passed but double-check ping (1 s later) failed — discarding as  transient/proxy-ARP false positive"
+						self._ghost_ips[ip] = now
+						if _DEBUG_PING_ONLY_2 or self.decideMyLog("Sweep"):
+							self.indiLOG.log(10,
+								f"Ping-only candidate at {ip}: first ping passed but double-check ping (1 s later) failed — discarding as transient/proxy-ARP false positive"
 							)
 						continue
 
@@ -3384,7 +3439,7 @@ class Plugin(indigo.PluginBase):
 
 			if self.decideMyLog("Sweep"):
 				self.indiLOG.log(10,
-					f"ARP sweep complete on {net_str}/{cidr}: "
+					f"ARP sweep complete on {net_str}/{cidr} in {time.time() - now:.1f}s: "
 					f"{seen_n} device(s) replied to ping (online), "
 					+ (f"{arp_alive_n} replied to ARP only (online, e.g. sleeping phones), " if arp_alive_n else "")
 					+ f"{discov_n} in ARP cache but no ping reply (likely offline / stale)"
@@ -4051,14 +4106,31 @@ class Plugin(indigo.PluginBase):
 				# checks ineffective.  TCP is never proxied, so a TCP failure is a
 				# reliable indicator that the device is genuinely offline.
 				ping_ok = _do_probe(ip, mac, entry, ping_only=ping_only, was_offline=True)
+				_arp_rescued = False
 				if not ping_ok:
 					# ICMP/TCP dead — final ARP liveness check: sleeping iPhones
 					# answer ARP in the Wi-Fi chip while ignoring ICMP and TCP.
-					ping_ok = self._arp_liveness_check(ip, mac)
+					ping_ok      = self._arp_liveness_check(ip, mac)
+					_arp_rescued = ping_ok
 					if ping_ok and log_ping:
 						self.indiLOG.log(10,
 							f"Confirm: ICMP/TCP failed but ARP answered — "
 							f"{names_by_mac.get(mac, mac)} ({ip}) kept ONLINE")
+				# Per-device log flag (logSeenToFile): every confirm challenge and its
+				# outcome shows in the device log — otherwise a long silent stretch
+				# gives no clue whether the gate rescued the device or never ran.
+				_dev_id_c = entry.get("indigo_device_id")
+				if (_dev_id_c and self._cache_props(_dev_id_c).get("logSeenToFile", False)
+						and (ping_ok or not was_offline)):
+					# only log while the ON/OFF decision is pending or on a rescue —
+					# an already-offline device probes for recovery every ~30 s and
+					# logging every miss flooded the log for the whole absence
+					_verdict = ("answers ARP, kept ONLINE" if _arp_rescued else
+					            "answers ping, kept ONLINE" if ping_ok else
+					            f"NO answer (miss {current_streak + 1}/{missed_needed})")
+					self.indiLOG.log(20,
+						f"{names_by_mac.get(mac, mac)} ({ip}) confirm gate: silent "
+						f"{int(silent_secs)}s (threshold {offline_threshold}s) — {_verdict}")
 				if ping_ok:
 					new_streak    = 0
 					online        = True
@@ -4419,6 +4491,33 @@ class Plugin(indigo.PluginBase):
 			except Exception as e:
 				if not _benign_ipc_error(e):
 					self.indiLOG.log(30, f"Group device state update failed for {dev.name}: {e}")
+			# changeToOn / changeToOff — separate tolerant call so a not-yet-
+			# registered state never blocks the critical onOffState update above.
+			try:
+				_u1b = [{"key": "changeToOn" if new_state else "changeToOff", "value": ts}]
+				dev.updateStatesOnServer(_u1b)
+				self._cache_patch_states(dev.id, _u1b)
+			except Exception:
+				pass   # state appears after the next plugin restart
+
+		# ── lastEveryoneHome / lastAllOnline ────────────────────────────────
+		# HOME_AWAY: "when was everyone home"; ONLINE group: "when were all
+		# participants online".  Refreshed on every recalc while ALL participants
+		# are on, and stamped once more on the recalc where the condition ends
+		# (one left/went offline) so it marks the END of the all-on period.
+		# Previous count is read BEFORE Call 2 patches the cache.
+		if participants:
+			_all_key  = "lastEveryoneHome" if typeId == HOME_AWAY else "lastAllOnline"
+			_prev_cnt = self._cache_states(dev.id).get(count_key, -1)
+			_all_on   = online_count == len(participants)
+			_was_all  = _prev_cnt == len(participants)
+			if _all_on or _was_all:
+				try:
+					_u_all = [{"key": _all_key, "value": _now_str()}]
+					dev.updateStatesOnServer(_u_all)
+					self._cache_patch_states(dev.id, _u_all)
+				except Exception:
+					pass   # state not yet registered — appears after next restart
 
 		# ── Call 2: count + participants states ─────────────────────────────
 		# Silently skipped if states are not yet registered (device hasn't
@@ -4805,6 +4904,17 @@ class Plugin(indigo.PluginBase):
 			except Exception as e:
 				if not _benign_ipc_error(e):
 					self.indiLOG.log(30, f"External device state update failed for {self._cache_name(dev.id)}: {e}")
+
+		# changeToOn / changeToOff — separate tolerant call so a not-yet-registered
+		# state (device not restarted since the upgrade) can never block the main
+		# batch above.
+		if new_online != prev_online:
+			try:
+				_u_ts = [{"key": "changeToOn" if new_online else "changeToOff", "value": _now_str()}]
+				dev.updateStatesOnServer(_u_ts)
+				self._cache_patch_states(dev.id, _u_ts)
+			except Exception:
+				pass   # state appears after the next plugin restart
 
 		# ── Update aggregate ONLINE group devices ──────────────────────────
 		if new_online != prev_online:

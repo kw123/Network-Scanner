@@ -447,6 +447,16 @@ Checked by ICMP ping only — no MAC tracking, no ARP sweep.</Label>
 				<TriggerLabel>Last On/Off Change</TriggerLabel>
 				<ControlPageLabel>Last On/Off Change</ControlPageLabel>
 			</State>
+			<State id="changeToOn">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Last Went Online</TriggerLabel>
+				<ControlPageLabel>Last Went Online</ControlPageLabel>
+			</State>
+			<State id="changeToOff">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Last Went Offline</TriggerLabel>
+				<ControlPageLabel>Last Went Offline</ControlPageLabel>
+			</State>
 			<State id="pingMs">
 				<ValueType>String</ValueType>
 				<TriggerLabel>Ping Response Time Changed</TriggerLabel>
@@ -532,6 +542,21 @@ Leave unused slots as "— not used —".</Label>
 				<ValueType>String</ValueType>
 				<TriggerLabel>Last On/Off Change</TriggerLabel>
 				<ControlPageLabel>Last On/Off Change</ControlPageLabel>
+			</State>
+			<State id="changeToOn">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Last Went Online</TriggerLabel>
+				<ControlPageLabel>Last Went Online</ControlPageLabel>
+			</State>
+			<State id="changeToOff">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Last Went Offline</TriggerLabel>
+				<ControlPageLabel>Last Went Offline</ControlPageLabel>
+			</State>
+			<State id="lastAllOnline">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Last Time All Were Online</TriggerLabel>
+				<ControlPageLabel>Last Time All Were Online</ControlPageLabel>
 			</State>
 		</States>
 	</Device>
@@ -714,6 +739,21 @@ Leave unused slots as "— not used —".</Label>
 				<ValueType>String</ValueType>
 				<TriggerLabel>Last On/Off Change</TriggerLabel>
 				<ControlPageLabel>Last On/Off Change</ControlPageLabel>
+			</State>
+			<State id="changeToOn">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Last Went Online</TriggerLabel>
+				<ControlPageLabel>Last Went Online</ControlPageLabel>
+			</State>
+			<State id="changeToOff">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Last Went Offline</TriggerLabel>
+				<ControlPageLabel>Last Went Offline</ControlPageLabel>
+			</State>
+			<State id="lastEveryoneHome">
+				<ValueType>String</ValueType>
+				<TriggerLabel>Last Time Everyone Was Home</TriggerLabel>
+				<ControlPageLabel>Last Time Everyone Was Home</ControlPageLabel>
 			</State>
 		</States>
 	</Device>

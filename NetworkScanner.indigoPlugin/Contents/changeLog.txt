@@ -1,7 +1,107 @@
  Network Scanner – Indigo Plugin
 Change Log
 ================================================================================
-Version 2026.5.73 (2026-07-08)
+Version 2026.5.80 (2026-07-29)
+
+1. Documentation: README updated for the states added in .78/.79 —
+     changeToOn / changeToOff now documented on External, Home/Away and
+     Online/Offline devices (previously networkDevice only), plus the new
+     group states lastEveryoneHome (Home/Away) and lastAllOnline
+     (Online/Offline group).  No code change.
+
+================================================================================
+Version 2026.5.79 (2026-07-28)
+
+1. One-time upgrade step (runs ONLY when upgrading to this version):
+     empty changeToOn / changeToOff states are seeded from the current
+     onOffState + lastOnOffChange, so the new columns from v2026.5.78
+     are not blank until the first real transition.  Runs 30 s after
+     startup (after all device state lists have refreshed); existing
+     values are never overwritten.
+
+2. New state lastEveryoneHome on the Home/Away group device: "when was
+     everyone home".  Refreshed on every recalc while ALL participants
+     are home, and stamped once more at the moment the condition ends
+     (someone left), so it marks the end of the last all-home period.
+
+3. Same for the external-devices ONLINE group: new state lastAllOnline
+     ("when were all participants online"), identical semantics.
+
+================================================================================
+Version 2026.5.78 (2026-07-28)
+
+1. changeToOn / changeToOff timestamp states (previously networkDevice
+     only) added to externalDevice, externalDevicesOffline (ONLINE
+     group), and networkDevicesHomeAway (Home/Away group), written on
+     every on/off transition.  lastOnOffChange is unchanged.  The new
+     states are pushed in a separate tolerant call so devices that have
+     not restarted since the upgrade keep their critical onOffState
+     updates working; the new states appear after the first restart.
+
+================================================================================
+Version 2026.5.77 (2026-07-28)
+
+1. Ghost IPs are now remembered for 6 hours after a failed verification:
+     the live log showed 10 ghost IPs rotating in pairs on a 5-sweep
+     cycle, forever - "discard permanently" only removed them from the
+     pending list, the router answered the sweep ping for them again the
+     next sweep, and after 5 sweeps they re-qualified for another 13 s
+     of verification pings.  A failed IP now goes on a ghost list
+     (_GHOST_IP_TTL = 6 h) and is skipped as a candidate entirely, so
+     sweeps return to sub-second once the initial round has been
+     classified.
+
+2. Confirm-gate device-log lines are emitted only while the ON/OFF
+     decision is pending (or on a successful rescue).  An offline device
+     probes for recovery every ~30 s, and logging every miss flooded the
+     device log for the entire absence ("miss 9/1" etc.).
+
+Real-world validation (2026-07-29): departure 09:56 -> OFFLINE 09:58:50
+[probe] (gate: silent 204s, NO answer); return ~12:34 -> detected within
+seconds of Wi-Fi rejoin; 8 h overnight with zero false offlines.
+
+================================================================================
+Version 2026.5.76 (2026-07-28)
+
+1. Ghost-candidate discards are now visible with the Sweep debug option
+     (previously only behind developer flags): each verification failure
+     logs the IP - "Ping-only candidate at x.x.x.x: verification ping
+     failed - discarding (ghost / proxy-ARP false positive)".  With the
+     v2026.5.75 cap the constant ~12.7 s sweep overhead = 2 ghost
+     verifications per sweep; these lines identify which IPs keep
+     feeding the queue (typically a router answering the fast sweep
+     ping on behalf of empty IPs).
+
+================================================================================
+Version 2026.5.75 (2026-07-28)
+
+1. Sweep stalled for 12.5 minutes (08:49:11 start, complete 09:01:47,
+     no error): the ping-only candidate verification runs SERIALLY in
+     the sweep thread at up to ~15 s per candidate (3-probe ping, 1 s
+     wait, second ping).  A burst of candidates - e.g. when arp -a
+     returns empty/truncated so every responding IP looks MAC-less -
+     could queue dozens of verifications in one sweep.  Verification is
+     now capped at 2 candidates per sweep (device creation was already
+     rate-limited to one per interval, so verifying a burst bought
+     nothing); the rest stay pending and are verified on the following
+     sweeps.
+
+2. The sweep-complete summary now includes the sweep duration, so any
+     future slow sweep identifies itself in the log.
+
+================================================================================
+Version 2026.5.74 (2026-07-28)
+
+1. The confirm gate is now visible in the per-device log (logSeenToFile):
+     every challenge of a timed-out device logs its outcome, e.g.
+       iphone1xprokarl (192.168.1.85) confirm gate: silent 205s
+       (threshold 180s) - answers ARP, kept ONLINE
+     or "NO answer (miss 1/1)".  Previously a long silent stretch gave
+     no clue whether the gate rescued the device or never ran at all
+     (the only rescue log line was behind the global Ping debug flag).
+
+================================================================================
+Version 2026.5.73 (2026-07-28)
 
 1. Removed the decade-old error filter that suppressed any exception
      whose message contains "None" (all 21 guard sites).  It was hiding
@@ -12,7 +112,7 @@ Version 2026.5.73 (2026-07-08)
      traceback.
 
 ================================================================================
-Version 2026.5.72 (2026-07-08)
+Version 2026.5.72 (2026-07-28)
 
 1. Diagnosis aid for the missing ARP-alive metronome: the ARP sweep has
      been dying mid-cycle with a silently swallowed exception (the
@@ -23,7 +123,7 @@ Version 2026.5.72 (2026-07-08)
      running (shutdown noise stays suppressed).
 
 ================================================================================
-Version 2026.5.71 (2026-07-08)
+Version 2026.5.71 (2026-07-28)
 
 1. OFFLINE 9 s after a sighting, again (reported 00:08:02 vs sighting
      00:07:53): the v2026.5.67 cancel-guard compared the live entry
@@ -40,7 +140,7 @@ Version 2026.5.71 (2026-07-08)
      capture of that same reply now cancels the false verdict.
 
 ================================================================================
-Version 2026.5.70 (2026-07-08)
+Version 2026.5.70 (2026-07-28)
 
 1. scanInterval is now a TRUE sweep period (sweep start to sweep start):
      both scan loops previously slept the full scanInterval AFTER the

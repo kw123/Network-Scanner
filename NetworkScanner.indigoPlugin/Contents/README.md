@@ -146,9 +146,9 @@ Aggregate device that watches up to **6 Network Devices** and tracks presence.
 - **Address column** — MAC addresses of all participants (space-separated), updated live. When *Flip Address / Notes* is ON: compact IP summary — if all participants share the same /24 subnet the common prefix is shown once (e.g. `192.168.1. 112 22 44`); otherwise full IPs are shown.
 - **Notes column** — current IP addresses in compact form (e.g. `192.168.1. - 12 15 25`), updated live (or MACs when *Flip* is ON)
 
-**Delay before OFF** — optional grace period (0 / 10 / 20 / 30 / 60 / 90 / 120 / 180 s) before the device flips to OFF when all participants go offline. If any participant comes back online during the delay the OFF transition is cancelled and the device stays ON. Useful to absorb brief WiFi drops or proxy-ARP timing artefacts that would otherwise trigger Away automations prematurely. Default is 0 (immediate).
+**Delay before OFF** — optional grace period (0 / 10 / 20 / 30 / 60 / 90 / 120 / 180 s) before the device flips to OFF when all participants go offline. If any participant comes back online during the delay the OFF transition is cancelled and the device stays ON. Useful to absorb brief WiFi drops or proxy-ARP timing artefacts that would otherwise trigger Away automations prematurely. Default is 0 (immediate). The countdown is re-evaluated every second while pending, so it fires reliably even when no further participant traffic arrives.
 
-Use the `ParticipantsHome` state in Indigo conditions to check if *at least N* people are home.
+Use the `ParticipantsHome` state in Indigo conditions to check if *at least N* people are home. The `lastEveryoneHome` state records the last time the whole household was present — handy for "nobody has been home since…" logic.
 
 ### External Devices — Online / Offline
 
@@ -282,6 +282,8 @@ When *Offline Trigger Logic* is set to **OR** and the first ping fails while the
 - **`host`** (String) — Configured hostname or IP
 - **`ipNumber`** (String) — Resolved IP address
 - **`pingMs`** (String) — Last ping round-trip time (e.g. `12 ms`) or `timeout`
+- **`changeToOn`** (String) — Timestamp (`YYYY-MM-DD HH:MM:SS`) of the most recent offline → online transition.
+- **`changeToOff`** (String) — Timestamp (`YYYY-MM-DD HH:MM:SS`) of the most recent online → offline transition.
 - **`lastOnOffChange`** (String) — Timestamp of last online ↔ offline transition
 - **`comment`** (String) — Free-text note
 
@@ -294,6 +296,10 @@ Applies to both **Network Devices — Home or Away** and **External Devices — 
 - **`onOffState`** (Boolean) — `True` = at least one participant is online/home
 - **`ParticipantsHome`** / **`ParticipantsOnline`** (Integer) — Count of currently online/home participants
 - **`participants`** (String) — Comma-separated Indigo device IDs of all configured slots
+- **`changeToOn`** (String) — Timestamp of the most recent transition to ON (first participant home / online).
+- **`changeToOff`** (String) — Timestamp of the most recent transition to OFF (all participants away / offline).
+- **`lastEveryoneHome`** (Home or Away only, String) — Timestamp of the last moment **all** watched devices were home. Refreshed continuously while everyone is home, and stamped once more when the first person leaves — so it marks the end of the last complete-household period.
+- **`lastAllOnline`** (Online / Offline only, String) — Timestamp of the last moment **all** watched External Devices were online. Same semantics as `lastEveryoneHome`.
 - **`lastOnOffChange`** (String) — Timestamp of last on/off transition
 - **`comment`** (String) — Free-text note
 
