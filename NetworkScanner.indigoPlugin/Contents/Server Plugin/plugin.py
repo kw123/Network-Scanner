@@ -9,6 +9,7 @@ __doc__ = "Network Scanner – Indigo Plugin.  See README.md for full documentat
 
 import indigo          # type: ignore  (provided by Indigo at runtime)
 import threading
+import queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 import subprocess
@@ -31,12 +32,12 @@ import MAC2Vendor  # type: ignore
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-PLUGIN_ID			= "com.karlwachs.networkscanner"
-DEVICE_TYPE_ID		= "networkDevice"
-EXT_DEVICE_TYPE_ID	= "externalDevice"
-HOME_AWAY			= "networkDevicesHomeAway"   # aggregate device: tracks up to 6 network devices
-ONLINE				= "externalDevicesOffline"   # aggregate device: tracks up to 3 external devices
-INTERNET_ADDRESS	= "internetAddress"          # monitors public WAN IP address
+PLUGIN_ID				= "com.karlwachs.networkscanner"
+NETWORK_DEVICE_TYPE_ID	= "networkDevice"
+EXT_DEVICE_TYPE_ID		= "externalDevice"
+HOME_AWAY				= "networkDevicesHomeAway"   # aggregate device: tracks up to 6 network devices
+INTERNET_IS_ON_OFFLINE	= "externalDevicesOffline"   # aggregate device: tracks up to 3 external devices
+INTERNET_ADDRESS		= "internetAddress"          # monitors public WAN IP address
 
 STDDTSTRING    = "%Y-%m-%d %H:%M:%S"
 _CURL_PORTS_DEFAULT = (80, 443, 22, 8080)
@@ -108,6 +109,21 @@ _LINK_LOCAL_BYTE1 = 0xA9   # 169
 _LINK_LOCAL_BYTE2 = 0xFE   # 254
 
 
+def _as_int(value, default: int = 0) -> int:
+	"""Coerce an Indigo state value to int, falling back to default.
+
+	Integer states read back as int normally, but a state that has never been
+	written (or was written as "") comes back as "" or None.  Comparing that
+	with < / > raises TypeError, and int("") raises ValueError — either would
+	abort _recalc_group_device the same way the uninitialised arrival flags
+	used to, so every numeric state read goes through here.
+	"""
+	try:
+		return int(value)
+	except (TypeError, ValueError):
+		return default
+
+
 #  before this time  expires no device will be set to off 
 _startupGracePeriod = 45
 
@@ -119,6 +135,8 @@ _startupGracePeriod = 45
 kDefaultPluginPrefs = {
 	"networkInterface":		"",   # blank = auto-detect (prefers Ethernet over Wi-Fi)
 	"scanInterval":			"60",
+	"whichSymbol":			"redGreen",
+	"whichOnOff":			"upDown",
 	"arpSweepEnabled":		True,
 	"sniffEnabled":			True,
 	"mdnsQueryEnabled":		True,
@@ -141,6 +159,7 @@ kDefaultPluginPrefs = {
 	"debugSeen":			False,
 	"debugSweep":			False,
 	"debugIgnored":			False,
+	"debugDelayedActions":	False,
 	"debugPing":			False,
 	"debugTcpdumpArp":		False,   # log every ARP reply captured by tcpdump (before throttle)
 	"debugArpSweepEntries":	False,   # log every entry parsed from  arp -a  during sweep
@@ -679,6 +698,7 @@ class Plugin(indigo.PluginBase):
 		self.indiLOG = logging.getLogger("Plugin")
 		self.indiLOG.setLevel(logging.DEBUG)
 		self.indigo_log_handler.setLevel(logging.INFO)
+		self.phase = "init"
 
 		# Build active log-areas list from prefs (no log output yet)
 		self.setLogFromPrefs(self.pluginPrefs, writeToLog=False)
@@ -722,6 +742,18 @@ class Plugin(indigo.PluginBase):
 		self._dhcp_proc2       = None   # DHCP tcpdump Popen (secondary)
 		self._startup_time     = time.time()   # overwritten in startup(); guards offline grace
 		self.in_grace_period   = True          # True until runConcurrentThread clears it
+		self.updatePropsQueue  = list()
+
+		# use which symbol in status column on/off or  green/ red
+		whichSymbol = self.pluginPrefs.get("whichSymbol", "")
+		if whichSymbol == "":
+			self.pluginPrefs["whichSymbol"] = kDefaultPluginPrefs["whichSymbol"]
+
+		# use which text in status column on/off or  up down 
+		whichOnOff = self.pluginPrefs.get("whichOnOff", "")
+		if whichOnOff == "":
+			self.pluginPrefs["whichOnOff"] = kDefaultPluginPrefs["whichOnOff"]
+
 
 		# Track the last-saved flipAddressNotes value so closedPrefsConfigUi can detect
 		# a change even though Indigo updates self.pluginPrefs before that callback fires.
@@ -755,6 +787,15 @@ class Plugin(indigo.PluginBase):
 		# HOME_AWAY off-delay: dev_id → timestamp when all participants first went offline.
 		# Cleared immediately if any participant comes back.  Key absent = not pending.
 		self._home_away_pending_off: dict = {}
+
+		# Delayed-action queue (ported from the piBeacon plugin, trimmed to the
+		# parts this plugin needs).  See startDelayedActionQueue().
+		self.delayedActions: dict        = {}
+		self.cancelDelayedActions: dict  = {}
+		# dev_id → token of the most recently queued action for that device.  A
+		# queued action carrying a stale token is dropped, so re-arming a delay
+		# supersedes the previous one instead of both firing.
+		self._da_tokens: dict            = {}
 
 		# Timestamp of the last successful ARP-cache flush (sudo arp -d -a).
 		# When recent, arp -a entries are fresh ARP replies and count as alive
@@ -1018,18 +1059,24 @@ class Plugin(indigo.PluginBase):
 
 	###----------------------------------------------------------###
 	def _cache_patch_states(self, dev_id: int, updates) -> None:
-		"""Apply a list of state-update dicts (or a single dict) to cached states."""
-		if not updates:
-			return
-		with self._dev_cache_lock:
-			entry = self._dev_cache.get(dev_id)
-			if entry:
-				if isinstance(updates, dict):
-					updates = [updates]
-				for u in updates:
-					key = u.get("key")
-					if key:
-						entry["states"][key] = u["value"]
+		try:
+			"""Apply a list of state-update dicts (or a single dict) to cached states."""
+			if not updates:
+				return
+			with self._dev_cache_lock:
+				entry = self._dev_cache.get(dev_id)
+				if entry:
+					if isinstance(updates, dict):
+						updates = [updates]
+					for u in updates:
+						key = u.get("key")
+						if key:
+							entry["states"][key] = u["value"]
+							
+		except Exception as e:
+				if not _benign_ipc_error(e):
+					self.indiLOG.log(30, f"Could not update address/notes for {dev.name}: {e}")
+
 
 	###----------------------------------------------------------###
 	def _cache_patch_props(self, dev_id: int, new_props: dict) -> None:
@@ -1141,7 +1188,7 @@ class Plugin(indigo.PluginBase):
 		_startup_now = time.time()
 		for _dev in indigo.devices.iter(PLUGIN_ID):
 			self._cache_put(_dev)
-			if _dev.deviceTypeId != DEVICE_TYPE_ID:
+			if _dev.deviceTypeId != NETWORK_DEVICE_TYPE_ID:
 				continue
 			if _dev.pluginProps.get("pingMode") != "pingOnly":
 				continue
@@ -1180,7 +1227,7 @@ class Plugin(indigo.PluginBase):
 			return
 		filled = 0
 		for dev in indigo.devices.iter(PLUGIN_ID):
-			if dev.deviceTypeId not in (DEVICE_TYPE_ID, EXT_DEVICE_TYPE_ID, HOME_AWAY, ONLINE):
+			if dev.deviceTypeId not in (NETWORK_DEVICE_TYPE_ID, EXT_DEVICE_TYPE_ID, HOME_AWAY, INTERNET_IS_ON_OFFLINE):
 				continue
 			try:
 				last = dev.states.get("lastOnOffChange", "")
@@ -1373,7 +1420,7 @@ class Plugin(indigo.PluginBase):
 		updates = [{"key": k, "value": v} for k, v in changed_states.items()]
 		try:
 			dev = indigo.devices[dev_id]
-			dev.updateStatesOnServer(updates)
+			self.doUpdateStatesOnServer(dev, updates)
 			with self._dev_cache_lock:
 				if dev_id in self._dev_cache:
 					self._dev_cache[dev_id]["states"].update(changed_states)
@@ -1387,11 +1434,185 @@ class Plugin(indigo.PluginBase):
 			self.indiLOG.log(20, f"_update_passive_info {mac}: {e}")
 
 	###----------------------------------------------------------###
+	####------------------ delayed action queue ------------------START
+	###----------------------------------------------------------###
+	def startDelayedActionQueue(self):
+		"""Initialise the delayed-action queue and start its worker thread.
+
+		Ported from the piBeacon plugin so both plugins queue timed work the
+		same way.  Trimmed deliberately: piBeacon's "eval" / "exec" actions are
+		NOT supported here (executing queued strings is not something this
+		plugin needs), and its device-specific actions are omitted.
+
+		Queue item shape:
+		    {"actionTime": time.time() + delay,     # when it may run
+		     "devId":      indigo device id,
+		     "updateItems": [ {"stateName": name,   # state to write
+		                       "value":     value,
+		                       "uiValue":   optional display string} ],
+		     "token":      optional int — see _da_tokens}
+		"""
+		if self.delayedActions == {}:
+			self.delayedActions["thread"]     = None
+			self.delayedActions["data"]       = queue.Queue()
+			self.delayedActions["state"]      = ""
+			self.delayedActions["lastCheck"]  = 0
+			self.delayedActions["lastActive"] = 0
+
+		_t = self.delayedActions.get("thread")
+		if self.delayedActions["state"] == "running" and _t and _t.is_alive():
+			self.indiLOG.log(10, "delayed action thread already running")
+			return
+
+		self.delayedActions["lastCheck"] = time.time()
+		self.delayedActions["state"]     = "start"
+		self.delayedActions["thread"]    = threading.Thread(
+			target=self.delayedActionsThread, daemon=True, name="NS-DelayedActions"
+		)
+		self.delayedActions["thread"].start()
+		self.indiLOG.log(10, "delayed action queue started")
+
+	###----------------------------------------------------------###
+	def stopDelayedActionQueue(self):
+		"""Ask the worker thread to exit.  Safe to call when not running."""
+		if not self.delayedActions or self.delayedActions.get("state") != "running":
+			return
+		self.delayedActions["state"] = "stop"
+
+	###----------------------------------------------------------###
+	def queueDelayedAction(self, delay: float, devId: int, updateItems: list,
+	                       supersede: bool = False):
+		"""Queue state writes for devId to be applied delay seconds from now.
+
+		supersede=True tags the action with a fresh per-device token, which
+		invalidates any action queued earlier for that device — use it for a
+		timer that must be re-armed rather than stacked.
+		Returns True when the action was queued.
+		"""
+		try:
+			if not self.delayedActions:
+				self.startDelayedActionQueue()
+			action = {"actionTime": time.time() + delay, "devId": devId,
+			          "updateItems": updateItems}
+			if supersede:
+				_tok = self._da_tokens.get(devId, 0) + 1
+				self._da_tokens[devId] = _tok
+				action["token"]        = _tok
+			self.delayedActions["data"].put(action)
+			if self.decideMyLog("DelayedActions"):
+				self.indiLOG.log(10, f"queueDelayedAction  in {delay}s  dev:{devId}  {updateItems}")
+			return True
+		except Exception as e:
+			if not _benign_ipc_error(e):
+				self.indiLOG.log(40, f"queueDelayedAction failed: {e}", exc_info=True)
+			return False
+
+	###----------------------------------------------------------###
+	def delayedActionsThread(self):
+		"""Worker: drain the queue every 0.5 s, apply what is due, requeue the rest."""
+		try:
+			self.delayedActions["state"] = "running"
+			while (self.delayedActions["state"] == "running"
+			       and not self._stop_event.is_set()):
+				try:
+					self._stop_event.wait(0.5)
+					self.delayedActions["lastCheck"] = time.time()
+					addback = []
+					while not self.delayedActions["data"].empty():
+						if self.delayedActions["state"] != "running":
+							break
+						action = self.delayedActions["data"].get()
+						self.delayedActions["lastActive"] = time.time()
+						devId = action.get("devId", 0)
+
+						# superseded by a later action for the same device
+						if ("token" in action
+								and self._da_tokens.get(devId) != action["token"]):
+							if self.decideMyLog("DelayedActions"):
+								self.indiLOG.log(10, f"delayedAction dropped (superseded) dev:{devId}")
+							continue
+
+						# explicitly cancelled
+						if devId in self.cancelDelayedActions:
+							self.cancelDelayedActions[devId] -= 1
+							if self.cancelDelayedActions[devId] <= 0:
+								self.cancelDelayedActions.pop(devId, None)
+							continue
+
+						# not due yet — put it back for a later pass
+						if time.time() < action["actionTime"]:
+							addback.append(action)
+							continue
+
+						if devId <= 0:
+							continue
+						try:
+							dev = indigo.devices[devId]
+						except Exception:
+							continue   # device deleted while queued
+
+						updList = []
+						for item in action.get("updateItems", []):
+							if "stateName" not in item:
+								continue
+							_name = item["stateName"]
+							# state not registered yet (device not restarted since
+							# the state was added to Devices.xml) — skip quietly
+							if _name not in dev.states:
+								continue
+							_val = item["value"]
+							if _val == dev.states[_name]:
+								continue   # already there, nothing to write
+							_u = {"key": _name, "value": _val}
+							if "uiValue" in item:
+								_u["uiValue"] = item["uiValue"]
+							updList.append(_u)
+
+						if not updList:
+							continue
+						if self.decideMyLog("DelayedActions"):
+							self.indiLOG.log(10, f"delayedAction applying dev:{dev.name}  {updList}")
+						try:
+							self.doUpdateStatesOnServer(dev, updList)
+							self._cache_patch_states(devId, updList)
+						except Exception as e:
+							if not _benign_ipc_error(e):
+								self.indiLOG.log(30, f"delayedAction update failed for {dev.name}: {e}")
+
+					for action in addback:
+						self.delayedActions["data"].put(action)
+
+				except self.StopThread:
+					break
+				except Exception:
+					self.indiLOG.log(40, "", exc_info=True)
+					self._stop_event.wait(3)
+		except Exception:
+			self.indiLOG.log(40, "", exc_info=True)
+		self.delayedActions["state"] = "stopped"
+		self.indiLOG.log(10, "delayed action queue stopped")
+
+	###----------------------------------------------------------###
+	####------------------ delayed action queue --------------------END
+	###----------------------------------------------------------###
+
+	###----------------------------------------------------------###
 	def runConcurrentThread(self):
 		"""Indigo's cooperative loop – sleep in 1 s steps so stop is near-instant."""
 		try:
+			self.phase = "loop"
 			while True:
 				self.sleep(1)
+				if len(	self.updatePropsQueue) > 0:
+					for xx in self.updatePropsQueue:
+						#self.indiLOG.log(20, f" updatePropsQueue  {xx}")
+						if xx[0] in indigo.devices:
+							dev = indigo.devices[xx[0]]
+							props = dev.pluginProps 
+							props[xx[1]] = xx[2]
+							dev.replacePluginPropsOnServer(props)
+							self.indiLOG.log(20, f" props  {props}")
+					self.updatePropsQueue = list()
 
 				# Process offline requests queued by background threads.
 				# IPC (updateStatesOnServer, replacePluginPropsOnServer) is safe here.
@@ -1425,9 +1646,11 @@ class Plugin(indigo.PluginBase):
 							self._home_away_pending_off.pop(_ha_id, None)
 					
 					
-
+		
 		except self.StopThread:
 			pass
+		self.phase = "end"
+					
 
 	# ------------------------------------------------------------------
 	# Preferences
@@ -1448,7 +1671,7 @@ class Plugin(indigo.PluginBase):
 		updated = 0
 		for dev in indigo.devices.iter(PLUGIN_ID):
 			try:
-				if dev.deviceTypeId == DEVICE_TYPE_ID:
+				if dev.deviceTypeId == NETWORK_DEVICE_TYPE_ID:
 					# ── networkDevice ────────────────────────────────────────
 					mac = dev.states.get("MACNumber", "")
 					ip  = dev.states.get("ipNumber",  "")
@@ -1556,13 +1779,15 @@ class Plugin(indigo.PluginBase):
 			if _flip_changed:
 				self._apply_flip_address_notes(_new_flip)
 			# Signal all threads to stop
+			self.stopDelayedActionQueue()
 			self._stop_event.set()
 			self._kill_tcpdump()
 			# Join with short timeout — scan/sniff threads check stop_event every 0.1–0.2 s
 			# so they should exit well within 1 second.  Never block the main thread longer.
 			for t in (self._scan_thread, self._sniff_thread,
 			          self._dhcp_thread, self._mdns_thread,
-			          self._sniff_thread2, self._dhcp_thread2, self._sweep_thread2):
+			          self._sniff_thread2, self._dhcp_thread2, self._sweep_thread2,
+			          self.delayedActions.get("thread")):
 				if t and t.is_alive():
 					t.join(timeout=1.0)
 			self._stop_event.clear()
@@ -1578,10 +1803,51 @@ class Plugin(indigo.PluginBase):
 		# existing device) and when a device is enabled/created at runtime.
 		self._cache_put(dev)
 
+		doLog = False# dev.id == 1855387305
+		if doLog: self.indiLOG.log(20, f"0..  {self.phase}; {self._schema_changed}; {dev.name}; {dev.states}")
+
+		if self.phase == "init":
+			if self._schema_changed:
+				dev.stateListOrDisplayStateIdChanged()	# update  from device.xml info if changed
+				self.sleep(0.01)
+				if doLog: self.indiLOG.log(20, f".1..  {self.phase}; {self._schema_changed}; {dev.name}; {dev.states}")
+
+			if "onOffState" in dev.states:
+
+				if "onOffState.ui" in dev.states:
+					uiValue = dev.states["onOffState.ui"]
+					uiValueS = uiValue.split()
+					if doLog: self.indiLOG.log(20, f"1.. {uiValue}  ; {uiValueS}, {dev.states}")
+					if uiValueS[0] in ["up","down","on","off"]:
+						ud = uiValueS[0]
+						if self.pluginPrefs["whichOnOff"] == "upDown": udSelect = ["up", "down"] 
+						else:										   udSelect = ["on", "off"] 
+						if doLog: self.indiLOG.log(20, f"2.. {udSelect} ")
+						if ud not in udSelect:
+							if len(ud) == len(uiValue):	stripped = ""
+							else: 						stripped = uiValue[len(ud):]
+							if doLog: self.indiLOG.log(20, f"3.. {stripped} ")
+							if dev.states["onOffState"]:
+								dev.updateStateOnServer("onOffState", value=True, uiValue=udSelect[0] + stripped)
+							else:
+								dev.updateStateOnServer("onOffState", value=False, uiValue=udSelect[1] + stripped)
+	
+
+				if self.pluginPrefs["whichSymbol"] == "redGreen":
+					if dev.states["onOffState"]:
+						dev.updateStateImageOnServer(indigo.kStateImageSel.SensorOn)
+					else:
+						dev.updateStateImageOnServer(indigo.kStateImageSel.SensorTripped)
+
+				else:
+					if dev.states["onOffState"]:
+						dev.updateStateImageOnServer(indigo.kStateImageSel.PowerOn)
+					else:
+						dev.updateStateImageOnServer(indigo.kStateImageSel.PowerOff)
+
+
 		# ── Internet Address device (public WAN IP monitor) ─────────────────
 		if dev.deviceTypeId == INTERNET_ADDRESS:
-			if self._schema_changed:
-				dev.stateListOrDisplayStateIdChanged()
 			self._start_internet_address_device(dev)
 			return
 
@@ -1594,8 +1860,6 @@ class Plugin(indigo.PluginBase):
 			# stale-local-object overwrites from multiple replacePluginPropsOnServer calls.
 			props         = dict(dev.pluginProps)
 			props_changed = False
-			if self._schema_changed:
-				dev.stateListOrDisplayStateIdChanged()
 
 			# Respect flipAddressNotes:
 			#   OFF (default): Address = host,        Notes = resolved IP
@@ -1638,7 +1902,7 @@ class Plugin(indigo.PluginBase):
 			return   # no MAC lookup, no port scan
 
 		# ── Aggregate group devices (HOME_AWAY / ONLINE) ────────────────────
-		if dev.deviceTypeId in (HOME_AWAY, ONLINE):
+		if dev.deviceTypeId in (HOME_AWAY, INTERNET_IS_ON_OFFLINE):
 			# Always refresh state list — needed for newly created devices as well
 			# as after a schema/version change.
 			dev.stateListOrDisplayStateIdChanged()
@@ -1666,8 +1930,6 @@ class Plugin(indigo.PluginBase):
 		# last run.  self._schema_changed is computed once in __init__ by comparing
 		# pluginVersion to pluginPrefs["schemaVersion"] — avoids a per-device prop
 		# read/write on every normal restart.
-		if self._schema_changed:
-			dev.stateListOrDisplayStateIdChanged()
 
 		mac = dev.states.get("MACNumber", "").lower()
 		if mac:
@@ -1695,10 +1957,10 @@ class Plugin(indigo.PluginBase):
 				backfill.append({
 					"key":     "onOffState",
 					"value":   online,
-					"uiValue": f"{'on' if online else 'off'}  {ts}",
-				})
+					"uiValue": f"{self.getonOffText(online)}  {ts}"
+					})
 			if backfill:
-				dev.updateStatesOnServer(backfill)
+				self.doUpdateStatesOnServer(dev, backfill)
 		except Exception as e:
 			if not _benign_ipc_error(e):
 				self.indiLOG.log(30, f"Backfill states failed for {dev.name}: {e}")
@@ -1717,6 +1979,15 @@ class Plugin(indigo.PluginBase):
 				target=_deferred_scan, args=(dev_id, ip),
 				daemon=True, name=f"NS-PS-{mac[-5:] if mac else dev_id}"
 			).start()
+			
+
+	###----------------------------------------------------------###
+	def getonOffText(self, online ):
+		if self.pluginPrefs["whichOnOff"] == "upDown":  udSelect = ["up", "down"] 
+		else: 											udSelect = ["on", "off"] 
+		if  online: return udSelect[0]
+		else:		return udSelect[1] 
+
 
 	###----------------------------------------------------------###
 	def deviceStopComm(self, dev):
@@ -1727,7 +1998,7 @@ class Plugin(indigo.PluginBase):
 			return
 		if dev.deviceTypeId == EXT_DEVICE_TYPE_ID:
 			self._ext_devices.pop(dev.id, None)
-		elif dev.deviceTypeId == DEVICE_TYPE_ID:
+		elif dev.deviceTypeId == NETWORK_DEVICE_TYPE_ID:
 			# Clear the cached device ID so the next _ensure_indigo_device call
 			# does a fresh lookup rather than chasing a stale ID.
 			mac = dev.states.get("MACNumber", "").lower()
@@ -1749,7 +2020,7 @@ class Plugin(indigo.PluginBase):
 		(history, IP, vendor) survives for re-association if the device is recreated.
 		"""
 		super().deviceDeleted(dev)
-		if dev.deviceTypeId != DEVICE_TYPE_ID:
+		if dev.deviceTypeId != NETWORK_DEVICE_TYPE_ID:
 			self._cache_drop(dev.id)
 			return
 		mac = dev.states.get("MACNumber", "").lower()
@@ -1836,7 +2107,7 @@ class Plugin(indigo.PluginBase):
 		"""Dynamic list callback: returns all networkDevice entries for trigger menus."""
 		items = [("0", "— not used —")]
 		for dev in sorted(indigo.devices.iter(PLUGIN_ID), key=lambda d: d.name.lower()):
-			if dev.deviceTypeId == DEVICE_TYPE_ID:
+			if dev.deviceTypeId == NETWORK_DEVICE_TYPE_ID:
 				ip = dev.states.get("ipNumber", "")
 				label = f"{dev.name}  ({ip})" if ip else dev.name
 				items.append((str(dev.id), label))
@@ -1846,7 +2117,7 @@ class Plugin(indigo.PluginBase):
 	def getDeviceConfigUiValues(self, pluginProps, typeId=None, devId=None):
 		"""Pre-populate device edit fields with current live values."""
 		theDictList = super(Plugin, self).getDeviceConfigUiValues(pluginProps, typeId, devId)
-		if typeId == DEVICE_TYPE_ID and devId:
+		if typeId == NETWORK_DEVICE_TYPE_ID and devId:
 			try:
 				dev = indigo.devices[devId]
 				theDictList[0]["manualIpOverride"]     = dev.states.get("ipNumber", "")
@@ -1866,7 +2137,7 @@ class Plugin(indigo.PluginBase):
 		"""
 		errorsDict = indigo.Dict()
 
-		if typeId == DEVICE_TYPE_ID:
+		if typeId == NETWORK_DEVICE_TYPE_ID:
 			new_mac = valuesDict.get("macOverride", "").strip()
 			if new_mac:
 				if not self._is_valid_mac(new_mac):
@@ -1907,7 +2178,7 @@ class Plugin(indigo.PluginBase):
 					}
 			comment = valuesDict.get("comment", "")
 			dev.updateStateOnServer("comment", value=comment)
-			# externalDevice: sync host → state, address column and registry
+			props = dict(dev.pluginProps)
 			if typeId == EXT_DEVICE_TYPE_ID:
 				host = valuesDict.get("host", "").strip()
 				host_changed = self._ext_devices.get(devId, {}).get("host", "") != host
@@ -1917,7 +2188,7 @@ class Plugin(indigo.PluginBase):
 						{"key": "ipNumber", "value": ""},
 						{"key": "pingMs",     "value": ""},
 					]
-				dev.updateStatesOnServer(state_updates)
+				self.doUpdateStatesOnServer(dev, state_updates)
 				self._cache_patch_states(devId, state_updates)
 				# Address column
 				if dev.pluginProps.get("address", "") != host:
@@ -1933,7 +2204,7 @@ class Plugin(indigo.PluginBase):
 				).start()
 
 			# ── Network device ──────────────────────────────────────────────────
-			elif typeId == DEVICE_TYPE_ID:
+			elif typeId == NETWORK_DEVICE_TYPE_ID:
 				# Sync pingMode property → state immediately on save
 				pm = valuesDict.get("pingMode", "confirm")
 				if dev.states.get("pingMode", "") != pm:
@@ -2022,7 +2293,7 @@ class Plugin(indigo.PluginBase):
 						# Reject if the target MAC is already owned by a different device
 						conflict = None
 						for d in indigo.devices.iter(PLUGIN_ID):
-							if d.id != devId and d.deviceTypeId == DEVICE_TYPE_ID:
+							if d.id != devId and d.deviceTypeId == NETWORK_DEVICE_TYPE_ID:
 								if d.states.get("MACNumber", "").lower() == new_mac:
 									conflict = d.name
 									break
@@ -2070,8 +2341,32 @@ class Plugin(indigo.PluginBase):
 								+ (f"  vendor: {vendor}" if vendor else ""))
 
 		# ── Aggregate group devices: recalculate immediately after participant list changes ──
-			elif typeId in (HOME_AWAY, ONLINE):
+			elif typeId in (HOME_AWAY):
 				self._recalc_group_device(dev)
+
+			elif typeId in (INTERNET_IS_ON_OFFLINE):
+				self._recalc_group_device(dev)
+				address = ""
+				for xx in ["1","2","3"]:
+					if "watchDevice"+xx in valuesDict:
+						try:
+							
+							indigoId = int(valuesDict["watchDevice"+xx])
+							watchDevice = indigo.devices[indigoId]
+							if watchDevice.states.get("host","") != "": 	
+								addr =	watchDevice.states.get("host")
+								if addr.find("www.") == 0: addr = addr[4:]
+								if addr.find(".com") > 0: addr = addr[:-4]
+								address +=	addr+","
+							elif watchDevice.states.get("ipNumber","") != "": 	
+								address +=	watchDevice.states.get("ipNumber") +","
+						except Exception as e:
+							if not _benign_ipc_error(e):
+								self.indiLOG.log(30, f"err {devId}: {e}")
+				address = address.strip(",")
+				if props.get("address", "") != address:
+					props["address"] = address
+					self.updatePropsQueue.append((dev.id, "address", address))
 
 		except Exception as e:
 			if not _benign_ipc_error(e):
@@ -2083,6 +2378,7 @@ class Plugin(indigo.PluginBase):
 
 	###----------------------------------------------------------###
 	def _start_threads(self):
+		self.startDelayedActionQueue()
 		iface = self.pluginPrefs.get("networkInterface", "_auto").strip()
 		if not iface or iface == "_auto":
 			iface = _auto_detect_iface()
@@ -4391,14 +4687,14 @@ class Plugin(indigo.PluginBase):
 
 	###----------------------------------------------------------###
 	def _recalc_group_device(self, dev):
-		"""Recalculate and push the aggregate state for one HOME_AWAY or ONLINE device.
+		"""Recalculate and push the aggregate state for one HOME_AWAY or INTERNET_IS_ON_OFFLINE device.
 
 		HOME_AWAY (networkDevicesHomeAway) — watches up to 6 networkDevice entries.
 		  onOffState = True  when at least one participant is home (online)
 		  onOffState = False when ALL participants are away (offline)
 		  ParticipantsHome = count currently online
 
-		ONLINE (externalDevicesOffline) — watches up to 3 externalDevice entries.
+		INTERNET_IS_ON_OFFLINE (externalDevicesOffline) — watches up to 3 externalDevice entries.
 		  onOffState = True  when at least one participant is online
 		  onOffState = False when ALL participants are offline
 		  ParticipantsOnline = count currently online
@@ -4414,7 +4710,14 @@ class Plugin(indigo.PluginBase):
 		slots     = 6 if typeId == HOME_AWAY else 3
 		count_key = "ParticipantsHome" if typeId == HOME_AWAY else "ParticipantsOnline"
 		props     = self._cache_props(dev.id) or dev.pluginProps
-
+		# Previous count.  MUST use count_key: externalDevicesOffline has no
+		# "ParticipantsHome" state at all (it uses ParticipantsOnline), so the
+		# old dev.states["ParticipantsHome"] raised KeyError for that type.
+		# Read from the cache — the same source _prev_cnt uses further down —
+		# so both cannot disagree, and default to 0 when the state is not yet
+		# registered (device not restarted since a plugin upgrade).
+		currentHome = _as_int(self._cache_states(dev.id).get(count_key, 0), 0)
+		
 		participants = [
 			props.get(f"watchDevice{i}", "").strip()
 			for i in range(1, slots + 1)
@@ -4441,8 +4744,50 @@ class Plugin(indigo.PluginBase):
 			except Exception:
 				participant_names.append(pid)   # fallback: show raw ID if device not found
 
+
+		# Edge-triggered arrival flags (HOME_AWAY only — externalDevicesOffline
+		# does not define these states).  Both MUST be initialised: the previous
+		# version assigned them only inside the two nested ifs, so any recalc
+		# with online_count == 1 hit UnboundLocalError and aborted the whole
+		# function before the count / onOffState writes below.
+		firstOneCameHome = False
+		allButOneGone    = False
+		firstGoneAfterAllHome = False
+		allHome          = False
+		count_delta      = 0
+		if typeId == HOME_AWAY:
+			# EDGE flags — each describes an event, needs the previous count, and
+			# is True for one recalc only.  They are mutually exclusive: both
+			# require the count to land on exactly 1, and differ only in the
+			# direction it came from.
+			#   firstOneCameHome — nobody was home, now one member is (0 -> 1).
+			#   allButOneGone    — several were home, now only one is still there
+			#     (4/3/2 -> 1).  Deliberately NOT true for 0 -> 1: a lone member
+			#     arriving at an empty house is not "all but one gone", because
+			#     nobody went anywhere.  currentHome > 1 also generalises the old
+			#     hardcoded "currentHome == 2", which never fired for a group of
+			#     3 or more members.
+			#   firstGoneAfterAllHome — everybody was home, now the first one has
+			#     gone (total -> total-1).  The mirror image of allButOneGone.
+			firstOneCameHome = (online_count == 1 and currentHome == 0)
+			allButOneGone    = (online_count == 1 and currentHome > 1)
+			_total           = len(participants)
+			firstGoneAfterAllHome = (_total > 0 and currentHome == _total
+			                         and online_count == _total - 1)
+			# LEVEL flag — describes a situation, not an event, so it ignores the
+			# previous count and mirrors the current one on every recalc.  The
+			# len() > 0 guard stops an empty group reading 0 == 0 as all home.
+			allHome          = (_total > 0 and online_count == _total)
+			# How far the count moved on this recalc: +n arrived, -n left, 0 = no
+			# change.  Normally +1 / -1; a larger step is possible when two
+			# participants flip between two recalcs, or on the first recalc after
+			# a restart, where currentHome is the count persisted before it.
+			count_delta      = online_count - currentHome
+		
 		raw_online = online_count > 0   # True = at least one home/online
 		prev_state = self._cache_states(dev.id).get("onOffState", None)
+		doLog =  False # dev.id == 1855387305
+		if doLog: self.indiLOG.log(30, f" ...  {dev.name}: {dev.states}")
 
 		# ── Off-delay logic (HOME_AWAY only) ─────────────────────────────────
 		# When all participants are offline and offDelay > 0, hold the OFF
@@ -4476,48 +4821,67 @@ class Plugin(indigo.PluginBase):
 		else:
 			new_state = raw_online
 
+		updList =  list()
+		if typeId == HOME_AWAY:
+			# .get() against the cache: these states exist only on HOME_AWAY and
+			# only after the device has restarted since they were added to
+			# Devices.xml — dev.states[...] would raise KeyError otherwise.
+			_dev_states = self._cache_states(dev.id) or {}
+			if bool(_dev_states.get("firstOneCameHome", False)) != firstOneCameHome:
+				updList.append( {"key": "firstOneCameHome", "value": firstOneCameHome} )
+			if bool(_dev_states.get("allButOneGone",    False)) != allButOneGone:
+				updList.append( {"key": "allButOneGone",    "value": allButOneGone} )
+			if bool(_dev_states.get("firstGoneAfterAllHome", False)) != firstGoneAfterAllHome:
+				updList.append( {"key": "firstGoneAfterAllHome", "value": firstGoneAfterAllHome} )
+			if bool(_dev_states.get("allHome",          False)) != allHome:
+				updList.append( {"key": "allHome",          "value": allHome} )
+			# allAway is the exact inverse of onOffState.  Derived from new_state
+			# rather than from online_count, so the "Delay before OFF" grace period
+			# applies to it too: while a pending OFF is still counting down,
+			# onOffState is still True and allAway stays False.
+			_allAway = not new_state
+			if bool(_dev_states.get("allAway",          False)) != _allAway:
+				updList.append( {"key": "allAway",          "value": _allAway} )
+			if _as_int(_dev_states.get("totalNumberOfParticipants", -1), -1) != len(participants):
+				updList.append( {"key": "totalNumberOfParticipants", "value": len(participants)} )
+			# participantsChanged / participantsHomeLast are written only on a real
+			# move, so a recalc that changes nothing else cannot wipe them.  The
+			# non-zero participantsChanged is returned to 0 by the 1 s loop in
+			# runConcurrentThread() five seconds later — _recalc_group_device is
+			# not called again until a participant changes, so it cannot self-reset.
+			if count_delta != 0:
+				updList.append( {"key": "participantsChanged",  "value": count_delta} )
+				updList.append( {"key": "participantsHomeLast", "value": currentHome} )
+				# supersede=True: a second move inside the 5 s window re-arms the
+				# timer instead of letting the first reset zero the new value early.
+				self.queueDelayedAction(5.0, dev.id,
+					[{"stateName": "participantsChanged", "value": 0}], supersede=True)
+
+
 		# ── Call 1: critical states (onOffState + lastOnOffChange) ──────────
 		# These always exist — safe to batch together.
 		if prev_state is None or bool(prev_state) != new_state:
 			ts = _now_str()
-			_u1 = [
-				{"key": "onOffState",      "value": new_state,
-				 "uiValue": f"{'on' if new_state else 'off'}  {ts}"},
-				{"key": "lastOnOffChange", "value": ts},
-			]
-			try:
-				dev.updateStatesOnServer(_u1)
-				self._cache_patch_states(dev.id, _u1)   # keep cache in sync
-			except Exception as e:
-				if not _benign_ipc_error(e):
-					self.indiLOG.log(30, f"Group device state update failed for {dev.name}: {e}")
+			updList.append( { "key": "onOffState",      "value": new_state, "uiValue": f"{self.getonOffText(new_state)}  {ts}"})
+			updList.append(	{ "key": "lastOnOffChange", "value": ts})
+			
 			# changeToOn / changeToOff — separate tolerant call so a not-yet-
 			# registered state never blocks the critical onOffState update above.
-			try:
-				_u1b = [{"key": "changeToOn" if new_state else "changeToOff", "value": ts}]
-				dev.updateStatesOnServer(_u1b)
-				self._cache_patch_states(dev.id, _u1b)
-			except Exception:
-				pass   # state appears after the next plugin restart
+			updList.append({"key": "changeToOn" if new_state else "changeToOff", "value": ts})
 
 		# ── lastEveryoneHome / lastAllOnline ────────────────────────────────
-		# HOME_AWAY: "when was everyone home"; ONLINE group: "when were all
+		# HOME_AWAY: "when was everyone home"; INTERNET_IS_ON_OFFLINE group: "when were all
 		# participants online".  Refreshed on every recalc while ALL participants
 		# are on, and stamped once more on the recalc where the condition ends
 		# (one left/went offline) so it marks the END of the all-on period.
 		# Previous count is read BEFORE Call 2 patches the cache.
 		if participants:
 			_all_key  = "lastEveryoneHome" if typeId == HOME_AWAY else "lastAllOnline"
-			_prev_cnt = self._cache_states(dev.id).get(count_key, -1)
+			_prev_cnt = _as_int(self._cache_states(dev.id).get(count_key, -1), -1)
 			_all_on   = online_count == len(participants)
 			_was_all  = _prev_cnt == len(participants)
 			if _all_on or _was_all:
-				try:
-					_u_all = [{"key": _all_key, "value": _now_str()}]
-					dev.updateStatesOnServer(_u_all)
-					self._cache_patch_states(dev.id, _u_all)
-				except Exception:
-					pass   # state not yet registered — appears after next restart
+				updList.append( {"key": _all_key, "value": _now_str()})
 
 		# ── Call 2: count + participants states ─────────────────────────────
 		# Silently skipped if states are not yet registered (device hasn't
@@ -4527,16 +4891,19 @@ class Plugin(indigo.PluginBase):
 		count_changed        = _cached_dev_states.get(count_key,     -1)  != online_count
 		participants_changed = _cached_dev_states.get("participants", "") != participants_str
 		if count_changed or participants_changed:
-			updates2 = []
 			if count_changed:
-				updates2.append({"key": count_key,      "value": online_count})
+				updList.append({"key": count_key,      "value": online_count})
 			if participants_changed:
-				updates2.append({"key": "participants", "value": participants_str})
+				updList.append({"key": "participants", "value": participants_str})
+
+		if doLog: self.indiLOG.log(30, f" ...  {updList}")
+		if updList != list():
 			try:
-				dev.updateStatesOnServer(updates2)
-				self._cache_patch_states(dev.id, updates2)   # keep cache in sync
-			except Exception:
-				pass   # states not yet defined — will appear after next plugin restart
+				self.doUpdateStatesOnServer(dev, updList)
+				self._cache_patch_states(dev.id, updList)
+			except Exception as e:
+				if not _benign_ipc_error(e):
+					self.indiLOG.log(30, f"Could not update address/notes for {dev.name}: {e}")
 
 		# ── Address + Notes columns for HOME_AWAY ───────────────────────────────
 		# Respects the flipAddressNotes pref:
@@ -4608,13 +4975,13 @@ class Plugin(indigo.PluginBase):
 	###----------------------------------------------------------###
 	def _update_group_devices(self, changed_dev_id: int):
 		"""Called after any participant device's onOffState changes.
-		Finds every HOME_AWAY / ONLINE aggregate device that watches changed_dev_id
+		Finds every HOME_AWAY / INTERNET_IS_ON_OFFLINE aggregate device that watches changed_dev_id
 		and recalculates its state.
 		"""
 		changed_id_str = str(changed_dev_id)
 		for dev in indigo.devices.iter(PLUGIN_ID):
 			typeId = dev.deviceTypeId
-			if typeId not in (HOME_AWAY, ONLINE):
+			if typeId not in (HOME_AWAY, INTERNET_IS_ON_OFFLINE):
 				continue
 			slots = 6 if typeId == HOME_AWAY else 3
 			props = dev.pluginProps
@@ -4628,6 +4995,37 @@ class Plugin(indigo.PluginBase):
 
 	# External device ping (user-configured hosts / DNS names)
 	# ------------------------------------------------------------------
+
+	def doUpdateStatesOnServer(self, dev, theList ):
+		try:
+			changeIcon = 0
+			for xx in theList:
+				if xx["key"] == "onOffState":
+					if xx["value"] :
+						changeIcon = 1
+					else: 
+						changeIcon = -1
+	
+			dev.updateStatesOnServer(theList)
+	
+			if changeIcon == 0: return 
+			
+			if self.pluginPrefs["whichSymbol"] == "redGreen":
+				if changeIcon == 1:
+					dev.updateStateImageOnServer(indigo.kStateImageSel.SensorOn)
+				else:
+					dev.updateStateImageOnServer(indigo.kStateImageSel.SensorTripped)
+			else:
+				if changeIcon == 1:
+					dev.updateStateImageOnServer(indigo.kStateImageSel.PowerOn)
+				else:
+					dev.updateStateImageOnServer(indigo.kStateImageSel.PowerOff)
+
+		except Exception as e:
+				if not _benign_ipc_error(e):
+					self.indiLOG.log(30, f"doUpdateStatesOnServer  {e}")
+		
+		
 
 	###----------------------------------------------------------###
 	def _check_external_devices(self):
@@ -4738,7 +5136,7 @@ class Plugin(indigo.PluginBase):
 
 		state_updates = []
 
-		onoff_str  = "on" if alive else "off"
+		onoff_str = self.getonOffText(alive)
 		# IP to display: new IP when alive, otherwise last known IP
 		display_ip = ip if (alive and ip) else prev_ip
 
@@ -4763,7 +5161,7 @@ class Plugin(indigo.PluginBase):
 		# uiValue includes the current IP so the device-list State column shows
 		# "on   203.0.113.42" / "off   203.0.113.42" alongside the on/off icon.
 		if alive != was_online or ip_changed or first_ip:
-			ui = f"{onoff_str}   {display_ip}" if display_ip else onoff_str
+			ui = f"{onoff_str}   {now}"
 			state_updates.append({"key": "onOffState", "value": alive, "uiValue": ui})
 
 		# publicIp: bare IP value for triggers/scripts; written whenever IP changes.
@@ -4776,7 +5174,7 @@ class Plugin(indigo.PluginBase):
 		except Exception:
 			return
 		try:
-			dev.updateStatesOnServer(state_updates)
+			self.doUpdateStatesOnServer(dev, state_updates)
 			self._cache_patch_states(dev_id, state_updates)
 			# Keep Address column and Notes in sync with the current public IP
 			if alive and ip:
@@ -4851,7 +5249,7 @@ class Plugin(indigo.PluginBase):
 				self.indiLOG.log(10, f"{self._cache_name(dev.id)} ({host}) is now {status}")
 			updates += [
 				{"key": "onOffState",     "value": new_online,
-				 "uiValue": f"{'on' if new_online else 'off'}  {_now_str()}"},
+				 "uiValue": f"{self.getonOffText(new_online)}  {_now_str()}"},
 				{"key": "lastOnOffChange","value": _now_str()},
 			]
 
@@ -4899,7 +5297,7 @@ class Plugin(indigo.PluginBase):
 
 		if updates:
 			try:
-				dev.updateStatesOnServer(updates)
+				self.doUpdateStatesOnServer(dev, updates)
 				self._cache_patch_states(dev.id, updates)
 			except Exception as e:
 				if not _benign_ipc_error(e):
@@ -4911,7 +5309,7 @@ class Plugin(indigo.PluginBase):
 		if new_online != prev_online:
 			try:
 				_u_ts = [{"key": "changeToOn" if new_online else "changeToOff", "value": _now_str()}]
-				dev.updateStatesOnServer(_u_ts)
+				self.doUpdateStatesOnServer(dev, _u_ts)
 				self._cache_patch_states(dev.id, _u_ts)
 			except Exception:
 				pass   # state appears after the next plugin restart
@@ -5283,7 +5681,7 @@ class Plugin(indigo.PluginBase):
 					name         = _create_name,
 					description  = mac if _flip else _padded_ip,   # Notes column
 					pluginId     = PLUGIN_ID,
-					deviceTypeId = DEVICE_TYPE_ID,
+					deviceTypeId = NETWORK_DEVICE_TYPE_ID,
 					props        = props,
 					folder       = folder_id,
 				)
@@ -5393,7 +5791,7 @@ class Plugin(indigo.PluginBase):
 		# Must be evaluated BEFORE the early-return guard so a "nothing else changed"
 		# cycle doesn't silently skip the update.
 		_now_epoch      = time.time()
-		last_on_msg_due = (self._cache_type(dev_id) == DEVICE_TYPE_ID and online
+		last_on_msg_due = (self._cache_type(dev_id) == NETWORK_DEVICE_TYPE_ID and online
 		                   and (_now_epoch - self._last_on_msg_ts.get(dev_id, 0) >= 60))
 
 		if not any([online_changed, ip_changed, mac_changed, vendor_changed, created_needed,
@@ -5431,7 +5829,7 @@ class Plugin(indigo.PluginBase):
 			state_updates.append({
 				"key":     "onOffState",
 				"value":   online,
-				"uiValue": f"{'on' if online else 'off'}  {ts}",
+				"uiValue": f"{self.getonOffText(online)}  {ts}",
 			})
 			state_updates.append({"key": "lastOnOffChange", "value": ts})
 			if online:
@@ -5500,7 +5898,7 @@ class Plugin(indigo.PluginBase):
 			return
 
 		try:
-			dev.updateStatesOnServer(state_updates)
+			self.doUpdateStatesOnServer(dev, state_updates)
 			self._cache_patch_states(dev_id, state_updates)
 
 			# Sync props only when relevant values changed
@@ -5984,7 +6382,7 @@ class Plugin(indigo.PluginBase):
 
 		net_macs = set()  # MACs already in NetworkScanner
 		for dev in indigo.devices.iter(PLUGIN_ID):
-			if dev.deviceTypeId != DEVICE_TYPE_ID:
+			if dev.deviceTypeId != NETWORK_DEVICE_TYPE_ID:
 				continue
 			mac = dev.states.get("MACNumber", "").strip().lower()
 			if mac:
@@ -6053,7 +6451,7 @@ class Plugin(indigo.PluginBase):
 					name         = safe_name,
 					description  = mac if _flip else _padded_ip,
 					pluginId     = PLUGIN_ID,
-					deviceTypeId = DEVICE_TYPE_ID,
+					deviceTypeId = NETWORK_DEVICE_TYPE_ID,
 					props        = props,
 					folder       = folder_id,
 				)
@@ -6069,7 +6467,7 @@ class Plugin(indigo.PluginBase):
 					state_updates.append({"key": "hardwareVendor", "value": vendor})
 				state_updates.append({"key": "created", "value": _now_str()})
 				try:
-					new_dev.updateStatesOnServer(state_updates)
+					new_self.doUpdateStatesOnServer(dev, state_updates)
 				except Exception:
 					pass   # states may not be registered yet on first creation
 
@@ -6142,7 +6540,7 @@ class Plugin(indigo.PluginBase):
 		out   = ["\n"]
 		for dev in indigo.devices.iter(PLUGIN_ID):
 			# Only MAC-based network devices have a fingscanDeviceInfo state
-			if dev.deviceTypeId != DEVICE_TYPE_ID:
+			if dev.deviceTypeId != NETWORK_DEVICE_TYPE_ID:
 				continue
 			if "MACNumber" not in dev.states: 
 				continue
@@ -6317,7 +6715,7 @@ class Plugin(indigo.PluginBase):
 		]
 		sep  = "═" * 80
 		now  = datetime.datetime.now().strftime(STDDTSTRING)
-		devs = [d for d in indigo.devices.iter(PLUGIN_ID) if d.deviceTypeId == DEVICE_TYPE_ID]
+		devs = [d for d in indigo.devices.iter(PLUGIN_ID) if d.deviceTypeId == NETWORK_DEVICE_TYPE_ID]
 		# A state is "empty in all devices" when no device has a non-empty value for it
 		empty_in_all = [k for k in _ALL_STATES
 		                if not any(d.states.get(k, "") for d in devs)]
@@ -6343,7 +6741,7 @@ class Plugin(indigo.PluginBase):
 
 		# Collect all networkDevices once
 		devs = [d for d in indigo.devices.iter(PLUGIN_ID)
-		        if d.deviceTypeId == DEVICE_TYPE_ID]
+		        if d.deviceTypeId == NETWORK_DEVICE_TYPE_ID]
 		devs.sort(key=lambda d: d.name.lower())
 
 		def _section(title, state_key):
@@ -6540,7 +6938,7 @@ class Plugin(indigo.PluginBase):
 				if folder_id:
 					kw["folder"] = folder_id
 				new_dev = indigo.device.create(**kw)
-				new_dev.updateStatesOnServer([{"key": "host", "value": host}])
+				new_self.doUpdateStatesOnServer(dev, [{"key": "host", "value": host}])
 				created.append(dev_name)
 				self.indiLOG.log(20, f"Created external device '{dev_name}' ({host})")
 			except Exception as e:
@@ -6559,7 +6957,7 @@ class Plugin(indigo.PluginBase):
 		internet_dev_exists = any(
 			d.name == _INTERNET_DEV_NAME
 			for d in indigo.devices.iter(PLUGIN_ID)
-			if d.deviceTypeId == ONLINE
+			if d.deviceTypeId == INTERNET_IS_ON_OFFLINE
 		)
 		if not internet_dev_exists:
 			all_ext = sorted(
@@ -6587,7 +6985,7 @@ class Plugin(indigo.PluginBase):
 						protocol     = indigo.kProtocol.Plugin,
 						name         = _INTERNET_DEV_NAME,
 						pluginId     = PLUGIN_ID,
-						deviceTypeId = ONLINE,
+						deviceTypeId = INTERNET_IS_ON_OFFLINE,
 						props        = agg_props,
 					)
 					if folder_id:

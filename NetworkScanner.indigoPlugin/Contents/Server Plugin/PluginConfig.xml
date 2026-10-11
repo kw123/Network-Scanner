@@ -19,6 +19,32 @@
 		<Label>── The following settings should work as they are by default ──</Label>
 	</Field>
 
+
+	<Field id="whichSymbol" type="menu" defaultValue="redGreen">
+		<Label>symbol</Label>
+		<List>
+			<Option value="redGreen">Red = offline; Green = online</Option>
+			<Option value="switch">indigo on off switch symbol</Option>
+		</List>
+	</Field>
+
+	<Field id="whichSymbolLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+		<Label>In the indigo device listing which symbols should be used in the status column</Label>
+	</Field>
+
+	<Field id="whichOnOff" type="menu" defaultValue="upDown">
+		<Label>status text</Label>
+		<List>
+			<Option value="upDown">up / down</Option>
+			<Option value="onOff">on off </Option>
+		</List>
+	</Field>
+
+	<Field id="wwhichOnOffLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+		<Label>In the indigo device listing which text should be used in the status column</Label>
+	</Field>
+
+whichOnOff
 	<Field id="networkInterface" type="menu" defaultValue="_auto">
 		<Label>Network Interface  (primary)</Label>
 		<List class="self" method="getActiveIfaceList" dynamicReload="true"/>
@@ -240,6 +266,14 @@ ON: Address = IP address, Notes = MAC address.</Label>
 
 	<Field id="debugArpSweepEntriesLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey" visibleBindingId="showdebugsection" visibleBindingValue="true">
 		<Label>Log every entry parsed from  arp -a  during each sweep cycle, with replied/cache-only status. Use to diagnose proxy-ARP deduplication.</Label>
+	</Field>
+
+	<Field id="debugDelayedActions" type="checkbox" visibleBindingId="showdebugsection" visibleBindingValue="true">
+		<Label>Log Delayed Actions</Label>
+	</Field>
+
+	<Field id="debugDelayedActionsLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey" visibleBindingId="showdebugsection" visibleBindingValue="true">
+		<Label>Log every queued and applied delayed action (queue time, device, states written). Use to diagnose timed state writes such as the 5 s participantsChanged reset.</Label>
 	</Field>
 
 </PluginConfig>

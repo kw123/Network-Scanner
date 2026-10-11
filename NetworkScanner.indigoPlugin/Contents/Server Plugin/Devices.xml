@@ -214,7 +214,7 @@ Ping success always wins (marks online immediately).
 		<States>
 			<State id="onOffState">
 				<ValueType boolType="onoff">Boolean</ValueType>
-				<TriggerLabel>Device Online Status Changed</TriggerLabel>
+				<TriggerLabel>Device Online Status</TriggerLabel>
 				<ControlPageLabel>Online</ControlPageLabel>
 			</State>
 			<State id="fingscanDeviceInfo">
@@ -224,17 +224,17 @@ Ping success always wins (marks online immediately).
 			</State>
 			<State id="ipNumber">
 				<ValueType>String</ValueType>
-				<TriggerLabel>IP Address Changed</TriggerLabel>
+				<TriggerLabel>IP Address</TriggerLabel>
 				<ControlPageLabel>IP Address</ControlPageLabel>
 			</State>
 			<State id="previousIps">
 				<ValueType>String</ValueType>
-				<TriggerLabel>Previous IPs Changed</TriggerLabel>
+				<TriggerLabel>Previous IPs</TriggerLabel>
 				<ControlPageLabel>Previous IPs</ControlPageLabel>
 			</State>
 			<State id="MACNumber">
 				<ValueType>String</ValueType>
-				<TriggerLabel>MAC Address Changed</TriggerLabel>
+				<TriggerLabel>MAC Address</TriggerLabel>
 				<ControlPageLabel>MAC Address</ControlPageLabel>
 			</State>
 			<State id="lastOnOffChange">
@@ -244,7 +244,7 @@ Ping success always wins (marks online immediately).
 			</State>
 			<State id="hardwareVendor">
 				<ValueType>String</ValueType>
-				<TriggerLabel>Vendor Changed</TriggerLabel>
+				<TriggerLabel>Vendor</TriggerLabel>
 				<ControlPageLabel>Vendor</ControlPageLabel>
 			</State>
 			<State id="created">
@@ -254,32 +254,32 @@ Ping success always wins (marks online immediately).
 			</State>
 			<State id="openPorts">
 				<ValueType>String</ValueType>
-				<TriggerLabel>Open Ports Changed</TriggerLabel>
+				<TriggerLabel>Open Ports</TriggerLabel>
 				<ControlPageLabel>Open Ports</ControlPageLabel>
 			</State>
 			<State id="comment">
 				<ValueType>String</ValueType>
-				<TriggerLabel>Comment Changed</TriggerLabel>
+				<TriggerLabel>Comment</TriggerLabel>
 				<ControlPageLabel>Comment</ControlPageLabel>
 			</State>
 			<State id="mdnsName">
 				<ValueType>String</ValueType>
-				<TriggerLabel>mDNS Name Changed</TriggerLabel>
+				<TriggerLabel>mDNS Name</TriggerLabel>
 				<ControlPageLabel>mDNS Name</ControlPageLabel>
 			</State>
 			<State id="arpHostname">
 				<ValueType>String</ValueType>
-				<TriggerLabel>ARP Hostname Changed</TriggerLabel>
+				<TriggerLabel>ARP Hostname</TriggerLabel>
 				<ControlPageLabel>ARP Hostname</ControlPageLabel>
 			</State>
 			<State id="isApOrRouter">
 				<ValueType boolType="truefalse">Boolean</ValueType>
-				<TriggerLabel>AP or Router Flag Changed</TriggerLabel>
+				<TriggerLabel>AP or Router Flag</TriggerLabel>
 				<ControlPageLabel>Is AP or Router</ControlPageLabel>
 			</State>
 			<State id="pingMode">
 				<ValueType>String</ValueType>
-				<TriggerLabel>Ping Mode Changed</TriggerLabel>
+				<TriggerLabel>Ping Mode</TriggerLabel>
 				<ControlPageLabel>Ping Mode</ControlPageLabel>
 			</State>
 			<State id="lastOnMessage">
@@ -289,62 +289,62 @@ Ping success always wins (marks online immediately).
 			</State>
 			<State id="setOnBy">
 				<ValueType>String</ValueType>
-				<TriggerLabel>Set On By Changed</TriggerLabel>
+				<TriggerLabel>Set On By</TriggerLabel>
 				<ControlPageLabel>Set On By</ControlPageLabel>
 			</State>
 			<State id="setOffBy">
 				<ValueType>String</ValueType>
-				<TriggerLabel>Set Off By Changed</TriggerLabel>
+				<TriggerLabel>Set Off By</TriggerLabel>
 				<ControlPageLabel>Set Off By</ControlPageLabel>
 			</State>
 			<State id="dhcpHostname">
 				<ValueType>String</ValueType>
-				<TriggerLabel>DHCP Hostname Changed</TriggerLabel>
+				<TriggerLabel>DHCP Hostname</TriggerLabel>
 				<ControlPageLabel>DHCP Hostname</ControlPageLabel>
 			</State>
 			<State id="mdnsServices">
 				<ValueType>String</ValueType>
-				<TriggerLabel>mDNS Services Changed</TriggerLabel>
+				<TriggerLabel>mDNS Services</TriggerLabel>
 				<ControlPageLabel>mDNS Services</ControlPageLabel>
 			</State>
 			<State id="mdnsModel">
 				<ValueType>String</ValueType>
-				<TriggerLabel>mDNS Model Changed</TriggerLabel>
+				<TriggerLabel>mDNS Model</TriggerLabel>
 				<ControlPageLabel>mDNS Model</ControlPageLabel>
 			</State>
 			<State id="osHint">
 				<ValueType>String</ValueType>
-				<TriggerLabel>OS Hint Changed</TriggerLabel>
+				<TriggerLabel>OS Hint</TriggerLabel>
 				<ControlPageLabel>OS Hint</ControlPageLabel>
 			</State>
 			<State id="deviceType">
 				<ValueType>String</ValueType>
-				<TriggerLabel>Device Type Changed</TriggerLabel>
+				<TriggerLabel>Device Type</TriggerLabel>
 				<ControlPageLabel>Device Type</ControlPageLabel>
 			</State>
 			<State id="appleModel">
 				<ValueType>String</ValueType>
-				<TriggerLabel>Apple Model Changed</TriggerLabel>
+				<TriggerLabel>Apple Model</TriggerLabel>
 				<ControlPageLabel>Apple Model</ControlPageLabel>
 			</State>
 			<State id="osVersion">
 				<ValueType>String</ValueType>
-				<TriggerLabel>OS Version Changed</TriggerLabel>
+				<TriggerLabel>OS Version</TriggerLabel>
 				<ControlPageLabel>OS Version</ControlPageLabel>
 			</State>
 			<State id="dhcpOsFingerprint">
 				<ValueType>String</ValueType>
-				<TriggerLabel>DHCP OS Fingerprint Changed</TriggerLabel>
+				<TriggerLabel>DHCP OS Fingerprint</TriggerLabel>
 				<ControlPageLabel>DHCP OS Fingerprint</ControlPageLabel>
 			</State>
 			<State id="networkInterface">
 				<ValueType>String</ValueType>
-				<TriggerLabel>Network Interface Changed</TriggerLabel>
+				<TriggerLabel>Network Interface</TriggerLabel>
 				<ControlPageLabel>Network Interface</ControlPageLabel>
 			</State>
 			<State id="pingMs">
 				<ValueType>String</ValueType>
-				<TriggerLabel>Ping RTT Changed</TriggerLabel>
+				<TriggerLabel>Ping RTT</TriggerLabel>
 				<ControlPageLabel>Ping RTT</ControlPageLabel>
 			</State>
 			<State id="changeToOn">
@@ -429,17 +429,17 @@ Checked by ICMP ping only — no MAC tracking, no ARP sweep.</Label>
 		<States>
 			<State id="onOffState">
 				<ValueType boolType="onoff">Boolean</ValueType>
-				<TriggerLabel>Device Online Status Changed</TriggerLabel>
+				<TriggerLabel>Device Online Status</TriggerLabel>
 				<ControlPageLabel>Online</ControlPageLabel>
 			</State>
 			<State id="host">
 				<ValueType>String</ValueType>
-				<TriggerLabel>Host Changed</TriggerLabel>
+				<TriggerLabel>Host</TriggerLabel>
 				<ControlPageLabel>Host</ControlPageLabel>
 			</State>
 			<State id="ipNumber">
 				<ValueType>String</ValueType>
-				<TriggerLabel>IP Address Changed</TriggerLabel>
+				<TriggerLabel>IP Address</TriggerLabel>
 				<ControlPageLabel>IP Address</ControlPageLabel>
 			</State>
 			<State id="lastOnOffChange">
@@ -459,12 +459,12 @@ Checked by ICMP ping only — no MAC tracking, no ARP sweep.</Label>
 			</State>
 			<State id="pingMs">
 				<ValueType>String</ValueType>
-				<TriggerLabel>Ping Response Time Changed</TriggerLabel>
+				<TriggerLabel>Ping Response Time</TriggerLabel>
 				<ControlPageLabel>Ping (ms)</ControlPageLabel>
 			</State>
 			<State id="comment">
 				<ValueType>String</ValueType>
-				<TriggerLabel>Comment Changed</TriggerLabel>
+				<TriggerLabel>Comment</TriggerLabel>
 				<ControlPageLabel>Comment</ControlPageLabel>
 			</State>
 		</States>
@@ -482,7 +482,7 @@ Checked by ICMP ping only — no MAC tracking, no ARP sweep.</Label>
 	-->
 	<Device type="custom" id="externalDevicesOffline">
 		<UiDisplayStateId>onOffState</UiDisplayStateId>
-		<Name>External Devices — online / offline</Name>
+		<Name>External Devices ping all</Name>
 		<ConfigUI>
 			<Field id="triggerLabel" type="label">
 				<Label>OFF when ALL selected External Devices are offline at the same time. 
@@ -525,7 +525,7 @@ Leave unused slots as "— not used —".</Label>
 			</State>
 			<State id="comment">
 				<ValueType>String</ValueType>
-				<TriggerLabel>Comment Changed</TriggerLabel>
+				<TriggerLabel>Comment</TriggerLabel>
 				<ControlPageLabel>Comment</ControlPageLabel>
 			</State>
 			<State id="ParticipantsOnline">
@@ -535,7 +535,7 @@ Leave unused slots as "— not used —".</Label>
 			</State>
 			<State id="participants">
 				<ValueType>String</ValueType>
-				<TriggerLabel>Participants Changed</TriggerLabel>
+				<TriggerLabel>Participants</TriggerLabel>
 				<ControlPageLabel>Participants</ControlPageLabel>
 			</State>
 			<State id="lastOnOffChange">
@@ -604,17 +604,17 @@ Services tried in order (first to respond wins):
 		<States>
 			<State id="onOffState">
 				<ValueType boolType="onoff">Boolean</ValueType>
-				<TriggerLabel>Reachable Status Changed</TriggerLabel>
+				<TriggerLabel>Reachable Status</TriggerLabel>
 				<ControlPageLabel>Online</ControlPageLabel>
 			</State>
 			<State id="publicIp">
 				<ValueType>String</ValueType>
-				<TriggerLabel>Public IP Changed</TriggerLabel>
+				<TriggerLabel>Public IP</TriggerLabel>
 				<ControlPageLabel>Public IP</ControlPageLabel>
 			</State>
 			<State id="previousIp">
 				<ValueType>String</ValueType>
-				<TriggerLabel>Previous IP Changed</TriggerLabel>
+				<TriggerLabel>Previous IP</TriggerLabel>
 				<ControlPageLabel>Previous IP</ControlPageLabel>
 			</State>
 			<State id="lastChanged">
@@ -634,7 +634,7 @@ Services tried in order (first to respond wins):
 			</State>
 			<State id="comment">
 				<ValueType>String</ValueType>
-				<TriggerLabel>Comment Changed</TriggerLabel>
+				<TriggerLabel>Comment</TriggerLabel>
 				<ControlPageLabel>Comment</ControlPageLabel>
 			</State>
 		</States>
@@ -648,13 +648,41 @@ Services tried in order (first to respond wins):
 	-->
 	<Device type="custom" id="networkDevicesHomeAway">
 		<UiDisplayStateId>onOffState</UiDisplayStateId>
-		<Name>Network Devices — Home or Away</Name>
+		<Name>Network Devices - count Home</Name>
 		<ConfigUI>
 			<Field id="triggerLabel" type="label">
-				<Label>ON  when ALL selected Network Devices are online at the same time ("all home")
+				<Label>ON  when 1 ... ALL selected Network Devices are online at the same time
 OFF when all are gone. 
-You can also trigger on "ParticipantsHome" to check if at least one is home
-Leave unused slots as "— not used —".</Label>
+
+You can trigger:
+
+if one comes home  firstOneCameHome becomes True or onOffState becomes True
+  also changeToOn shows the time stamp when the first one came home
+
+if all are home  ParticipantsHome becomes = all phones
+  also allHome becomes True
+  also lastEveryoneHome shows the time stamp when the all arrived at home
+
+if all were home and the first one goes  firstGoneAfterAllHome becomes True
+
+if number of ParticipantsHome drops to 1 (from 2,3,4...) allButOneGone becomes True 
+
+if all are gone: onOffState becomes false
+ also changeToOff shows the time stamp when the last one left home
+
+counts, better used as conditions than as triggers:
+participantsChanged  = +1 when one more is home, -1 when one left,
+  back to 0 five seconds later - so trigger on "becomes equal to 1" / "-1"
+participantsHomeLast = value of ParticipantsHome before the last change
+totalNumberOfParticipants = number of slots in use (not counting "not used")
+
+firstOneCameHome, firstGoneAfterAllHome and allButOneGone are momentary:
+  True for one update, then back to False - trigger on them, do not test them
+  in a condition.  allHome stays True for as long as everybody is home.
+  with only 2 phones, 2 -> 1 sets BOTH firstGoneAfterAllHome and allButOneGone;
+  they only differ from 3 phones up.
+
+ Leave unused slots as "— not used —".</Label>
 			</Field>
 
 			<Field id="watchDevice1" type="menu" >
@@ -717,9 +745,10 @@ Leave unused slots as "— not used —".</Label>
 		<States>
 			<State id="onOffState">
 				<ValueType boolType="onoff">Boolean</ValueType>
-				<TriggerLabel>All Home</TriggerLabel>
-				<ControlPageLabel>Online</ControlPageLabel>
+				<TriggerLabel>onOffState</TriggerLabel>
+				<ControlPageLabel>onOffState</ControlPageLabel>
 			</State>
+
 			<State id="ParticipantsHome">
 				<ValueType>Integer</ValueType>
 				<TriggerLabel>Participants Home</TriggerLabel>
@@ -727,34 +756,89 @@ Leave unused slots as "— not used —".</Label>
 			</State>
 			<State id="participants">
 				<ValueType>String</ValueType>
-				<TriggerLabel>Participants Changed</TriggerLabel>
-				<ControlPageLabel>Participants</ControlPageLabel>
+				<TriggerLabel>participants</TriggerLabel>
+				<ControlPageLabel>participants</ControlPageLabel>
 			</State>
+
+			<State id="firstOneCameHome">
+				<ValueType>Boolean</ValueType>
+				<TriggerLabel>firstOneCameHome</TriggerLabel>
+				<ControlPageLabel>firstOneCameHome</ControlPageLabel>
+			</State>
+
+			<State id="allButOneGone">
+				<ValueType>Boolean</ValueType>
+				<TriggerLabel>allButOneGone</TriggerLabel>
+				<ControlPageLabel>allButOneGone</ControlPageLabel>
+			</State>
+
+			<State id="allHome">
+				<ValueType>Boolean</ValueType>
+				<TriggerLabel>allHome</TriggerLabel>
+				<ControlPageLabel>allHome</ControlPageLabel>
+			</State>
+
+
+			<State id="allAway">
+				<ValueType>Boolean</ValueType>
+				<TriggerLabel>allAway</TriggerLabel>
+				<ControlPageLabel>allAway</ControlPageLabel>
+			</State>
+
+			<State id="firstGoneAfterAllHome">
+				<ValueType>Boolean</ValueType>
+				<TriggerLabel>firstGoneAfterAllHome</TriggerLabel>
+				<ControlPageLabel>firstGoneAfterAllHome</ControlPageLabel>
+			</State>
+
+			<State id="participantsChanged">
+				<ValueType>Integer</ValueType>
+				<TriggerLabel>participantsChanged</TriggerLabel>
+				<ControlPageLabel>participantsChanged</ControlPageLabel>
+			</State>
+
+			<State id="participantsHomeLast">
+				<ValueType>Integer</ValueType>
+				<TriggerLabel>participantsHomeLast</TriggerLabel>
+				<ControlPageLabel>participantsHomeLast</ControlPageLabel>
+			</State>
+
+			<State id="totalNumberOfParticipants">
+				<ValueType>Integer</ValueType>
+				<TriggerLabel>totalNumberOfParticipants</TriggerLabel>
+				<ControlPageLabel>totalNumberOfParticipants</ControlPageLabel>
+			</State>
+
 			<State id="comment">
 				<ValueType>String</ValueType>
-				<TriggerLabel>Comment Changed</TriggerLabel>
+				<TriggerLabel>Comment</TriggerLabel>
 				<ControlPageLabel>Comment</ControlPageLabel>
 			</State>
+
 			<State id="lastOnOffChange">
 				<ValueType>String</ValueType>
-				<TriggerLabel>Last On/Off Change</TriggerLabel>
-				<ControlPageLabel>Last On/Off Change</ControlPageLabel>
+				<TriggerLabel>Last Time On/Off Change</TriggerLabel>
+				<ControlPageLabel>Last Time On/Off Change</ControlPageLabel>
 			</State>
+
 			<State id="changeToOn">
 				<ValueType>String</ValueType>
-				<TriggerLabel>Last Went Online</TriggerLabel>
-				<ControlPageLabel>Last Went Online</ControlPageLabel>
+				<TriggerLabel>Last Time Went Online</TriggerLabel>
+				<ControlPageLabel>Last Time Went Online</ControlPageLabel>
 			</State>
+
 			<State id="changeToOff">
 				<ValueType>String</ValueType>
-				<TriggerLabel>Last Went Offline</TriggerLabel>
-				<ControlPageLabel>Last Went Offline</ControlPageLabel>
+				<TriggerLabel>Last Time Went Offline</TriggerLabel>
+				<ControlPageLabel>Last Time Went Offline</ControlPageLabel>
 			</State>
+
 			<State id="lastEveryoneHome">
 				<ValueType>String</ValueType>
 				<TriggerLabel>Last Time Everyone Was Home</TriggerLabel>
 				<ControlPageLabel>Last Time Everyone Was Home</ControlPageLabel>
 			</State>
+
 		</States>
 	</Device>
 

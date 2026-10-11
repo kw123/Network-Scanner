@@ -97,6 +97,7 @@ No third-party packages required.
 - **Log Ping / Probe Results** — Log every ICMP ping and TCP probe result (noisy during sweeps).
 - **Log Tcpdump ARP Replies** — Log every ARP reply captured by tcpdump including throttled ones (very noisy).
 - **Log ARP Sweep Entries** — Log every entry parsed from `arp -a` during each sweep.
+- **Log Delayed Actions** — Log every queued and applied delayed action (queue time, device, states written). Use to diagnose timed state writes such as the 5 s `participantsChanged` reset.
 
 ### Per-Device Diagnostic Trace
 
@@ -142,13 +143,16 @@ Aggregate device that watches up to **6 Network Devices** and tracks presence.
 - **ON** — at least one watched device is online ("someone home")
 - **OFF** — all watched devices are offline ("everyone away")
 - `ParticipantsHome` — count of currently online participants
+- `allHome` — `True` while every configured participant is home
+- `totalNumberOfParticipants` — number of slots actually in use
+- `participantsChanged` — `+1` / `-1` as the count moves, back to `0` after 5 s
 - `participants` — comma-separated Indigo device IDs of all configured slots
 - **Address column** — MAC addresses of all participants (space-separated), updated live. When *Flip Address / Notes* is ON: compact IP summary — if all participants share the same /24 subnet the common prefix is shown once (e.g. `192.168.1. 112 22 44`); otherwise full IPs are shown.
 - **Notes column** — current IP addresses in compact form (e.g. `192.168.1. - 12 15 25`), updated live (or MACs when *Flip* is ON)
 
-**Delay before OFF** — optional grace period (0 / 10 / 20 / 30 / 60 / 90 / 120 / 180 s) before the device flips to OFF when all participants go offline. If any participant comes back online during the delay the OFF transition is cancelled and the device stays ON. Useful to absorb brief WiFi drops or proxy-ARP timing artefacts that would otherwise trigger Away automations prematurely. Default is 0 (immediate).
+**Delay before OFF** — optional grace period (0 / 10 / 20 / 30 / 60 / 90 / 120 / 180 s) before the device flips to OFF when all participants go offline. If any participant comes back online during the delay the OFF transition is cancelled and the device stays ON. Useful to absorb brief WiFi drops or proxy-ARP timing artefacts that would otherwise trigger Away automations prematurely. Default is 0 (immediate). The countdown is re-evaluated every second while pending, so it fires reliably even when no further participant traffic arrives.
 
-Use the `ParticipantsHome` state in Indigo conditions to check if *at least N* people are home.
+Use the `ParticipantsHome` state in Indigo conditions to check if *at least N* people are home, or `allHome` for the simple "everyone is in" test. The `lastEveryoneHome` state records the last time the whole household was present — handy for "nobody has been home since…" logic. `firstOneCameHome`, `firstGoneAfterAllHome` and `allButOneGone` are momentary flags for the moment somebody arrives at an empty house, the moment the first person leaves a full house, and the moment the house drops to its last remaining member (see device states below).
 
 ### External Devices — Online / Offline
 
@@ -282,6 +286,8 @@ When *Offline Trigger Logic* is set to **OR** and the first ping fails while the
 - **`host`** (String) — Configured hostname or IP
 - **`ipNumber`** (String) — Resolved IP address
 - **`pingMs`** (String) — Last ping round-trip time (e.g. `12 ms`) or `timeout`
+- **`changeToOn`** (String) — Timestamp (`YYYY-MM-DD HH:MM:SS`) of the most recent offline → online transition.
+- **`changeToOff`** (String) — Timestamp (`YYYY-MM-DD HH:MM:SS`) of the most recent online → offline transition.
 - **`lastOnOffChange`** (String) — Timestamp of last online ↔ offline transition
 - **`comment`** (String) — Free-text note
 
@@ -294,6 +300,21 @@ Applies to both **Network Devices — Home or Away** and **External Devices — 
 - **`onOffState`** (Boolean) — `True` = at least one participant is online/home
 - **`ParticipantsHome`** / **`ParticipantsOnline`** (Integer) — Count of currently online/home participants
 - **`participants`** (String) — Comma-separated Indigo device IDs of all configured slots
+- **`changeToOn`** (String) — Timestamp of the most recent transition to ON (first participant home / online).
+- **`changeToOff`** (String) — Timestamp of the most recent transition to OFF (all participants away / offline).
+- **`lastEveryoneHome`** (Home or Away only, String) — Timestamp of the last moment **all** watched devices were home. Refreshed continuously while everyone is home, and stamped once more when the first person leaves — so it marks the end of the last complete-household period.
+- **`lastAllOnline`** (Online / Offline only, String) — Timestamp of the last moment **all** watched External Devices were online. Same semantics as `lastEveryoneHome`.
+- **`allHome`** (Home or Away only, Boolean) — *Level* flag: `True` for as long as `ParticipantsHome` equals the number of configured participants, `False` otherwise. A group with no participants configured stays `False`.
+- **`firstOneCameHome`** (Home or Away only, Boolean) — *Edge* flag: `True` on the single recalc where the count goes from **0 → 1** (somebody arrived at an empty house), cleared on the next recalc.
+- **`allButOneGone`** (Home or Away only, Boolean) — *Edge* flag: `True` on the single recalc where the count drops from more than one to exactly one (**4/3/2 → 1**) — everyone except one member has gone. Cleared on the next recalc.
+- **`firstGoneAfterAllHome`** (Home or Away only, Boolean) — *Edge* flag: `True` on the single recalc where the count drops from all members to all-but-one (**total → total − 1**) — everybody was home and the first one has now gone. The mirror image of `allButOneGone`. Cleared on the next recalc.
+- **`totalNumberOfParticipants`** (Home or Away only, Integer) — Number of slots actually configured, i.e. not left at *— not used —*. The denominator `allHome` compares against.
+- **`participantsHomeLast`** (Home or Away only, Integer) — The value `ParticipantsHome` held before the most recent change. Written only when the count actually moves, so it is never overwritten with the current value by an unrelated recalc.
+- **`participantsChanged`** (Home or Away only, Integer) — How far the count just moved: `+1` when one more member is home, `-1` when one left, then back to `0` five seconds later. Normally ±1, but a larger step is possible when two members flip between two recalcs, or on the first recalc after a restart where the previous count is the one persisted before it. Trigger on it *becoming* `1` or `-1`; it is too short-lived to test in a condition.
+
+> `firstOneCameHome` and `allButOneGone` are mutually exclusive. Both require the count to land on exactly 1 and differ only in the direction it came from, so `allButOneGone` is deliberately **not** set on 0 → 1: a lone member arriving at an empty house is not "all but one gone", because nobody went anywhere. A drop straight to 0 sets neither. For the standing condition "exactly one member is home", test `ParticipantsHome == 1` instead — neither flag is a level condition.
+
+> In a **two**-member group `allButOneGone` and `firstGoneAfterAllHome` both fire on 2 → 1, since "all but one gone" and "the first one gone after all were home" describe the same event there. They only diverge from three members up.
 - **`lastOnOffChange`** (String) — Timestamp of last on/off transition
 - **`comment`** (String) — Free-text note
 
@@ -350,7 +371,8 @@ indigo.server.sendEmailTo("your email address", subject=theSubject, body=theBody
 - **Force Immediate Rescan** — Triggers an ARP sweep + ping check immediately.
 - **Ping a Device (IP or DNS)…** — Enter any IP address or DNS name, click PING. Result is logged and written to `networkScanner_pingDevice` as `{ip} {ms}ms on/off`.
 - **Add Internet Ping Devices…** — Select from Google, Yahoo, Microsoft, CNN, Siemens, SAP, Indigodomo, or enter a custom hostname. Creates External Device entries for each selected host — device name is `Ping-{host}`. Safe to run multiple times — skips any host that already exists. Also contains an **Add Internet Address device** button.
-- **Perform Broad Port Scan on All Online Devices…** — TCP connect scan of all 25 known ports on every online device. Menu-triggered run is verbose: every device shown with all ports found; newly discovered ports marked `++++ new ++++`. Also runs automatically once per night after 02:00 in quiet mode — only devices with newly discovered ports are printed, plus `no new ports found` if nothing changed.
+- **Perform Broad Port Scan on All Online Devices…** — TCP connect scan of all 36 known ports on every online device. Menu-triggered run is verbose: every device shown with all ports found; newly discovered ports marked `++++ new ++++`. Also runs automatically once per night after 02:00 in quiet mode — only devices with newly discovered ports are printed, plus `no new ports found` if nothing changed.
+- **Slow Port Scan on One Device…** — Probes TCP ports 1 up to a selectable limit (1 000 / 2 000 / 3 000 / 5 000 / 10 000) on a single device at ≤ 2 ports/second. Runs entirely in the background (returns immediately). Progress logged every 100 ports; final report lists every open port with service name. Open ports merged cumulatively into the device's `openPorts` state. Estimated run times: 1 000 ports ≈ 8–17 min · 2 000 ≈ 17–33 min · 3 000 ≈ 25–50 min · 5 000 ≈ 42–83 min · 10 000 ≈ 83–167 min.
 - **Set a State of Device…** — Manually overwrite any state on any plugin device.
 - **Print tools…** — Combined reporting dialog:
   - *All discovered devices* — Prints all known MACs with IP, local name, vendor, on/off and last-seen to plugin.log.
@@ -393,6 +415,15 @@ Tracks the time between consecutive sightings of each device, bucketed into:
 
 Ignored MACs are neither created nor updated by the scanner.
 
+### Always-ignored addresses
+
+Two IPv4 addresses are never tracked as hosts and cannot be un-ignored:
+
+- **`224.0.0.251`** — the mDNS / Bonjour multicast group. Appears as a *permanent* `arp -a` entry (MAC `01:00:5e:00:00:fb`) and as a packet address in tcpdump output.
+- **`255.255.255.255`** — the all-hosts broadcast address, seen as the destination of DHCP Discover and similar traffic.
+
+Without this filter both can be registered as bogus network devices that then drift offline and never recover. The filter is applied in every path that can create a device: the passive sniff thread, the `arp -a` sweep parser, and both device-registration entry points. Unrelated to this, `0.0.0.0` (DHCP Discover before a lease exists) and `169.254.x.x` (RFC 3927 link-local / APIPA) are also rejected as device addresses.
+
 ---
 
 ## Local Name Resolution
@@ -408,10 +439,29 @@ Both states are write-once-per-source — a `?` result from `arp -a` never erase
 
 ## Scanned TCP Ports
 
-21 (FTP), 22 (SSH), 23 (Telnet), 25 (SMTP), 53 (DNS), 80 (HTTP), 110 (POP3), 143 (IMAP),
-443 (HTTPS), 445 (SMB), 548 (AFP), 554 (RTSP), 587 (SMTP submission), 631 (IPP/printing),
-993 (IMAPS), 995 (POP3S), 1883 (MQTT), 3306 (MySQL), 3389 (RDP), 5000 (UPnP/dev server),
-5900 (VNC), 8080 (HTTP-alt), 8443 (HTTPS-alt), 9100 (Raw printing), 32400 (Plex)
+36 ports probed by the broad port scan and the slow port scan:
+
+21 (FTP), 22 (SSH), 23 (Telnet), 25 (SMTP), 53 (DNS), 80 (HTTP), 110 (POP3),
+123 (NTP†), 143 (IMAP), 161 (SNMP†), 162 (SNMP-trap†), 389 (LDAP), 443 (HTTPS),
+445 (SMB), 548 (AFP), 554 (RTSP), 587 (SMTP submission), 631 (IPP/printing),
+636 (LDAPS), 989 (FTPS-data), 990 (FTPS), 993 (IMAPS), 995 (POP3S),
+1400 (Sonos), 1883 (MQTT), 3306 (MySQL), 3389 (RDP), 5000 (UPnP/dev server),
+5432 (PostgreSQL), 5900 (VNC), 8080 (HTTP-alt), 8123 (Home Assistant),
+8443 (HTTPS-alt), 9100 (Raw printing), 32400 (Plex), 32469 (Plex DLNA)
+
+† NTP (123), SNMP (161), and SNMP-trap (162) are primarily UDP services. A TCP hit on these ports indicates the daemon also listens on TCP (NTP time transfer, SNMPv3 TCP transport).
+
+---
+
+## Delayed Action Queue
+
+A background worker (`NS-DelayedActions`) applies device-state writes at a chosen time instead of immediately. Ported from the piBeacon plugin so both plugins queue timed work the same way, trimmed to what this plugin needs — piBeacon's `eval` / `exec` queue items are deliberately **not** supported here.
+
+Queue an action with `queueDelayedAction(delay, devId, updateItems, supersede=False)`, where each item is `{"stateName": …, "value": …}` plus an optional `"uiValue"`. The worker wakes every 0.5 s, applies whatever is due, and puts the rest back. Items naming a state the device does not have yet are skipped quietly, so a state added in a plugin upgrade cannot break the queue before the device restarts.
+
+`supersede=True` tags the action with a per-device token that invalidates anything queued earlier for that device — use it for a timer that must be **re-armed** rather than stacked. `participantsChanged` relies on this: a second count change inside the 5 s window re-arms the reset instead of letting the first one zero the new value early.
+
+The worker starts with the other threads and stops on the plugin's stop event, so a prefs save or a plugin reload shuts it down cleanly.
 
 ---
 
