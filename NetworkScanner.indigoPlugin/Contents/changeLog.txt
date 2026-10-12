@@ -1,7 +1,7 @@
  Network Scanner – Indigo Plugin
 Change Log
 ================================================================================
-SUMMARY — 2026.5.83 @ 2026-10-11   NOT PUBLISHED YET
+SUMMARY — 2026.5.86 @ 2026-10-11   NOT PUBLISHED YET
 
 FIXES:      The Home/Away group device had stopped writing ParticipantsHome
             and onOffState whenever exactly one member was home, the ONLINE
