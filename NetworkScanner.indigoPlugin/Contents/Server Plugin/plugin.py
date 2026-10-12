@@ -140,6 +140,7 @@ kDefaultPluginPrefs = {
 	"arpSweepEnabled":		True,
 	"sniffEnabled":			True,
 	"mdnsQueryEnabled":		True,
+	"arpResolveNames":		False,  # False = arp -an (numeric, fast); True = arp -a (resolves names, can be very slow)
 	"offlineThreshold":		"180",
 	"autoCreateDevices":		True,
 	"syntheticDevicesEnabled":	False,
@@ -3286,31 +3287,83 @@ class Plugin(indigo.PluginBase):
 				return
 
 			# Adaptive arp timeout: start from last known-good value stored in pluginPrefs.
-			# On each timeout double it and save back so the next call (and next plugin
-			# start) uses the higher value.  Cap at 120 s to avoid hanging the scan loop.
+			# On each timeout raise it by 10 s and save back so the next call (and next
+			# plugin start) uses the higher value, capped at _ARP_TIMEOUT_MAX to avoid
+			# hanging the scan loop.
 			arp_timeout = max(_ARP_TIMEOUT_MIN,
 			                  int(self.pluginPrefs.get("arpTimeout", _ARP_TIMEOUT_MIN)))
+			# -n (numeric) is the DEFAULT and strongly recommended.  Without it,
+			# macOS arp does one reverse-DNS lookup per cache entry, so the run time
+			# scales with the size of the cache: on a host whose cache had been
+			# filled with ~1500 proxy-ARP'd 169.254.x.x entries, "arp -a" took over
+			# two minutes while "arp -an" took 0.05 s.  That is what makes the
+			# adaptive timeout below climb to _ARP_TIMEOUT_MAX and stay there.
+			# Turning the pref on only adds the hostname column, which this plugin
+			# uses as a FALLBACK name: the parser below already maps "?" and bare
+			# dotted-decimal names to "", and mdns_name takes priority over the ARP
+			# name anyway (see _update_passive_info / local_name_source).
+			_arp_resolve_names = self.pluginPrefs.get(
+				"arpResolveNames", kDefaultPluginPrefs["arpResolveNames"])
+			_arp_argv = [
+				self._exe_arp,
+				"-a",             # show ALL entries in the kernel ARP cache
+			]
+			if not _arp_resolve_names:
+				_arp_argv.append("-n")   # numeric only — no reverse DNS per entry
+			_arp_argv += ["-i", iface]   # entries learned on this interface only
 			result = None
 			for _arp_attempt in range(2):
 				try:
+					_arp_t0 = time.time()
 					result = subprocess.run(
-						[
-							self._exe_arp,
-							"-a",         # show ALL entries in the kernel ARP cache
-							"-i", iface,  # limit output to entries learned on this interface
-						],
+						_arp_argv,
 						stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
 						timeout=arp_timeout, text=True
 					)
-					break   # success — keep current timeout
+					# Success — let the stored timeout recover.  It is raised by 10 s on
+					# every timeout and persisted, and used to stay at the ceiling for
+					# ever: a host that was slow once kept a 40 s timeout long after the
+					# cause was gone, and every later run started from there.  Step back
+					# down by 10 s per good cycle, mirroring the step up, but only when
+					# the call finished well inside the current budget — a run that only
+					# just made it must not lower the bar.
+					_arp_elapsed = time.time() - _arp_t0
+					if (arp_timeout > _ARP_TIMEOUT_MIN
+							and _arp_elapsed < arp_timeout / 2):
+						_relaxed = max(_ARP_TIMEOUT_MIN, arp_timeout - 10)
+						if _relaxed != arp_timeout:
+							self.pluginPrefs["arpTimeout"] = str(_relaxed)
+							if self.decideMyLog("Sweep"):
+								self.indiLOG.log(10,
+									f"arp finished in {_arp_elapsed:.2f}s — lowering the "
+									f"stored timeout {arp_timeout}s -> {_relaxed}s")
+					break   # success
 				except subprocess.TimeoutExpired:
+					at_cap      = arp_timeout >= _ARP_TIMEOUT_MAX
 					new_timeout = min(arp_timeout + 10, _ARP_TIMEOUT_MAX)
-					self.pluginPrefs["arpTimeout"] = str(new_timeout)
-					self.indiLOG.log(30,
-						f"arp -a timeout ({arp_timeout}s) — raising to {new_timeout}s"
-						+ (", retrying" if _arp_attempt == 0 else ", giving up"))
+					# Only a real increase is worth persisting.
+					if not at_cap:
+						self.pluginPrefs["arpTimeout"] = str(new_timeout)
+					# Once at the cap, a retry runs with the SAME timeout: no extra
+					# chance of success, but it doubles the stall to 2 x the cap.
+					# Give up for this cycle and let the next sweep try again.
+					_retry = (_arp_attempt == 0 and not at_cap)
+					if at_cap:
+						self.indiLOG.log(30,
+							f"arp timeout ({arp_timeout}s) — already at the maximum "
+							f"({_ARP_TIMEOUT_MAX}s), giving up this cycle"
+							+ ("; turn OFF \"Resolve host names in arp\" in the plugin "
+							   "config — name resolution is what makes arp slow"
+							   if _arp_resolve_names else
+							   "; check the ARP cache size with  arp -an | wc -l"))
+					else:
+						self.indiLOG.log(30,
+							f"arp -a timeout ({arp_timeout}s) — raising to {new_timeout}s"
+							+ (", retrying" if _retry else ", giving up"))
 					arp_timeout = new_timeout
 					result = None
+					if not _retry:
+						break
 				except Exception as e:
 					self.indiLOG.log(30, f"arp -a error: {e}")
 					result = None

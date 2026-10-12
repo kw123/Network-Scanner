@@ -668,6 +668,7 @@ if all were home and the first one goes  firstGoneAfterAllHome becomes True
 if number of ParticipantsHome drops to 1 (from 2,3,4...) allButOneGone becomes True 
 
 if all are gone: onOffState becomes false
+ also allAway becomes True
  also changeToOff shows the time stamp when the last one left home
 
 counts, better used as conditions than as triggers:
@@ -678,7 +679,9 @@ totalNumberOfParticipants = number of slots in use (not counting "not used")
 
 firstOneCameHome, firstGoneAfterAllHome and allButOneGone are momentary:
   True for one update, then back to False - trigger on them, do not test them
-  in a condition.  allHome stays True for as long as everybody is home.
+  in a condition.  allHome and allAway stay True for as long as the condition
+  holds - allAway is simply the opposite of onOffState, so the "Delay before
+  OFF" applies to it too.
   with only 2 phones, 2 -> 1 sets BOTH firstGoneAfterAllHome and allButOneGone;
   they only differ from 3 phones up.
 

@@ -7,7 +7,9 @@ FIXES:      The Home/Away group device had stopped writing ParticipantsHome
             and onOffState whenever exactly one member was home, the ONLINE
             group device raised KeyError on every single recalc, the
             "one member left" flag only ever fired for a 2-member group,
-            and PluginConfig.xml was malformed XML (2 unclosed <List>).
+            PluginConfig.xml was malformed XML (2 unclosed <List>), and the
+            arp timeout warning claimed to raise a timeout it was already
+            capped at, then retried pointlessly at the same value.
 TECHNICAL:  Every numeric state read in the group recalc now goes through a
             coercion helper and the device cache, so a never-written state
             can no longer abort the recalc, and timed state writes run on a
@@ -15,8 +17,10 @@ TECHNICAL:  Every numeric state read in the group recalc now goes through a
 NEW:        Home/Away states allHome, allButOneGone (renamed from
             lastOneHome, now firing for 4/3/2 -> 1), firstGoneAfterAllHome,
             participantsChanged, participantsHomeLast and
-            totalNumberOfParticipants; and a "Log Delayed Actions" debug
-            option.
+            totalNumberOfParticipants; a "Log Delayed Actions" debug
+            option; and a "Resolve host names in arp" pref - the ARP sweep
+            now runs  arp -an  by default, which is orders of magnitude
+            faster on a large or proxy-ARP-polluted ARP cache.
 
 ================================================================================
 Version 2026.5.83 (2026-10-11)
@@ -59,7 +63,32 @@ Version 2026.5.83 (2026-10-11)
      whole file failed to parse.  Pre-existing, and apparently tolerated
      silently by Indigo.  Both tags are now closed.
 
-8. TECHNICAL: every numeric state read in _recalc_group_device goes through
+8. The ARP sweep now runs  arp -an  instead of  arp -a .  Without -n macOS
+     arp does one reverse-DNS lookup per cache entry, so the run time scales
+     with the size of the ARP cache, not the network: measured on a host
+     whose cache held ~1500 proxy-ARP'd 169.254.x.x entries, arp -a took
+     over 2 minutes while arp -an took 0.05 s.  That is what drove the
+     adaptive arp timeout to its 40 s ceiling and logged a warning every
+     cycle.  New pref "Resolve host names in arp" (default OFF) restores
+     the old behaviour.  No parser change was needed - with -n the name
+     column is "?", which the sweep already maps to "no name" - and the
+     ARP host name is only a fallback, mDNS names take priority.
+
+9. FIX: the arp timeout warning said "raising to 40s" when it was already
+     AT the 40 s maximum, because min(40+10, 40) is 40, and the pref write
+     was a no-op.  Worse, it then retried with the same 40 s timeout, so a
+     hung arp cost 80 s per cycle for no extra chance of success.  It now
+     reports that it is at the maximum, gives up after the first attempt,
+     and points at the name-resolution pref as the likely cause.
+
+10. The adaptive arp timeout now recovers.  It was raised by 10 s on every
+     timeout and persisted in the arpTimeout pref, but never lowered, so a
+     host that was slow once started every later arp call at the 40 s
+     ceiling for ever.  A call that finishes in under half its budget now
+     steps the stored value back down by 10 s (floor 15 s), mirroring the
+     step up.  A run that only just made it does not lower the bar.
+
+11. TECHNICAL: every numeric state read in _recalc_group_device goes through
      a new _as_int() helper.  Integer states that have never been written
      come back as "" or None, and comparing those with < / > raises
      TypeError, which would have aborted the recalc exactly the way the

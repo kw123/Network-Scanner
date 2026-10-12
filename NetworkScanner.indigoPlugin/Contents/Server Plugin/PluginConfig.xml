@@ -268,6 +268,14 @@ ON: Address = IP address, Notes = MAC address.</Label>
 		<Label>Log every entry parsed from  arp -a  during each sweep cycle, with replied/cache-only status. Use to diagnose proxy-ARP deduplication.</Label>
 	</Field>
 
+	<Field id="arpResolveNames" type="checkbox" defaultValue="false">
+		<Label>Resolve host names in arp</Label>
+	</Field>
+
+	<Field id="arpResolveNamesLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+		<Label>OFF (recommended) runs  arp -an  and reads the cache numerically. ON runs  arp -a , which does one reverse-DNS lookup per cache entry — on a large or proxy-ARP-polluted ARP cache that can take minutes instead of milliseconds and will trip the arp timeout every cycle. The host name from arp is only a fallback: mDNS/Bonjour names take priority and are unaffected by this setting.</Label>
+	</Field>
+
 	<Field id="debugDelayedActions" type="checkbox" visibleBindingId="showdebugsection" visibleBindingValue="true">
 		<Label>Log Delayed Actions</Label>
 	</Field>
