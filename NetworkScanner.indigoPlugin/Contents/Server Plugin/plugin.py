@@ -134,15 +134,24 @@ _startupGracePeriod = 45
 # ---------------------------------------------------------------------------
 kDefaultPluginPrefs = {
 	"networkInterface":		"",   # blank = auto-detect (prefers Ethernet over Wi-Fi)
+	"networkInterface2":		"_none",  # "_none" / blank = second interface disabled
 	"scanInterval":			"60",
 	"whichSymbol":			"redGreen",
 	"whichOnOff":			"upDown",
 	"arpSweepEnabled":		True,
 	"sniffEnabled":			True,
-	"mdnsQueryEnabled":		True,
+	# Renamed from "mdnsQueryEnabled" in 2026.6.x so that EXISTING installs pick
+	# up the new default: the loop below only fills keys MISSING from saved prefs,
+	# so a new key name is what applies a new default everywhere.  The old key is
+	# left in prefs, unused and harmless.
+	# Default is "auto" because the short A/B runs could not separate on from off:
+	# four runs each landed inside their own noise, and sightings is biased anyway
+	# (the sniffer's 30 s per-MAC throttle is shared with the mDNS branch).  auto
+	# alternates and keeps score, so the answer accumulates during normal use.
+	"activeMdnsEnabled":	"auto",    # "on" | "off" | "auto" (alternate blocks of _MDNS_AUTO_BLOCK sweeps)
 	"arpResolveNames":		False,  # False = arp -an (numeric, fast); True = arp -a (resolves names, can be very slow)
 	"offlineThreshold":		"180",
-	"autoCreateDevices":		True,
+	"autoCreateDevices":	True,
 	"syntheticDevicesEnabled":	False,
 	"flipAddressNotes":		False,  # swap Address (MAC) and Notes (IP) columns for Network Devices
 	"deviceFolder":			"Network Devices",
@@ -154,6 +163,7 @@ kDefaultPluginPrefs = {
 	"pingMode":				"confirm",
 	# 							logging categories  (key = "debug" + area-name)
 	"showdebugsection":		True,
+	"showexpertsection":	False,   # expert settings stay collapsed unless asked for
 	"debugNewDevice":		True,
 	"debugStateChange":		True,
 	"debugIpChange":		True,
@@ -182,6 +192,8 @@ for _kk in kDefaultPluginPrefs:
 # Last entry is the catch-all "larger than 300 s" bucket (stored as the
 # integer 301 internally so it sorts correctly; printed as "300+").
 # ---------------------------------------------------------------------------
+_AB_LIST_MAX = 40   # most devices listed per section in the mDNS A/B report
+_MDNS_AUTO_BLOCK = 2   # in "auto" mode: sweeps per block before flipping the query
 _SEEN_BINS  = [10, 30, 60, 90, 120, 180, 240, 300, 301]   # 301 == "300+" bucket
 _SEEN_LABEL = {b: (f"≤{b}s" if b != 301 else ">300s") for b in _SEEN_BINS}
 
@@ -387,32 +399,6 @@ def _mac_to_device_name(mac: str, vendor: str = "", local_name: str = "", prefix
 			return f"{base}  {safe}"
 	return base
 
-
-
-def _strip_name_mac(name: str, mac: str = "") -> str:
-	"""Drop the auto-generated "<prefix><MAC>" head from a device name.
-
-	_mac_to_device_name() builds names as  Net_AA:BB:CC:DD:EE:FF  iPhone , so a
-	list row that already shows the MAC in its own column would print it twice,
-	separated by that helper's double space:
-
-	    01:00:5e:00:00:fb Net_01:00:5E:00:00:FB  mdnsmcastnet
-
-	Cutting everything up to and including the MAC leaves just the human part,
-	with inner runs of whitespace collapsed:
-
-	    01:00:5e:00:00:fb mdnsmcastnet
-
-	Returns "" when the name carried no human part at all (name was only the
-	prefix + MAC), and the name unchanged when it does not contain the MAC.
-	"""
-	if not name:
-		return ""
-	if mac:
-		idx = name.upper().find(mac.upper())
-		if idx >= 0:
-			name = name[idx + len(mac):]
-	return " ".join(name.split())
 
 
 def _icmp_checksum(data: bytes) -> int:
@@ -910,6 +896,18 @@ class Plugin(indigo.PluginBase):
 		# MACs / IPs to never create or modify Indigo devices for.
 		# _load_ignored() may populate these itself while migrating, so seed them
 		# first — it writes the file through self._ignored_* .
+		self._sweep_seq         = 0       # count of COMPLETED ARP sweeps
+		self._mdns_mode_this_sweep = True # whether the current sweep sent the query
+		self._auto_last_total   = None    # sighting total at the last sweep boundary
+		self._auto_last_per_mac = None    # per-MAC sighting totals at that boundary
+		try:
+			self._auto_stats = json.loads(self.pluginPrefs.get("mdnsAutoStats", "") or "{}")
+		except Exception:
+			self._auto_stats = {}
+		self._sweep_last_ts     = 0.0     # epoch of the last completed sweep
+		self._sweep_cycle_secs  = 0.0     # measured sweep-to-sweep period (EWMA)
+		self._mdns_ab_running   = False   # True while the mDNS A/B test thread runs
+		self._mdns_ab_keep_saved = False  # True when a config save must outrank the test's restore
 		self._ignored_macs: set = set()
 		self._ignored_ips:  set = set()
 		self._ignored_macs, self._ignored_ips = self._load_ignored()
@@ -1316,7 +1314,41 @@ class Plugin(indigo.PluginBase):
 		if self._schema_changed and self._plugin_version == "2026.5.79":
 			threading.Thread(target=self._backfill_change_timestamps,
 			                 daemon=True, name="NS-BackfillTs").start()
+		# One-time upgrade step — runs ONLY when upgrading to 2026.7.0: repair
+		# indigo_device_id for known entries that lost it.  Deferred for the same
+		# reason as above: every deviceStartComm must have run so the MAC states
+		# are readable, otherwise a live device looks like an orphan.
+		if self._schema_changed and self._plugin_version == "2026.7.0":
+			threading.Thread(target=self._relink_device_ids_on_upgrade,
+			                 daemon=True, name="NS-RelinkIds").start()
 		self.indiLOG.log(10, f"Network Scanner active")
+
+	###----------------------------------------------------------###
+	def _relink_device_ids_on_upgrade(self):
+		"""One-time upgrade step (2026.7.0): repair missing indigo_device_id.
+
+		Entries can lose the link in a batch — 51 of 135 on the author's server
+		lost theirs within one evening, 34 still carrying this plugin's own
+		"Net_<MAC>" names.  Without the id the entry is unreachable from the
+		(Un)Ignore dialog and shows up in every mDNS test as unseen, so it looks
+		like a dead device while its Indigo device is still right there.
+		Deferred 30 s so every deviceStartComm has refreshed its state list.
+		"""
+		if self._stop_event.wait(30):
+			return
+		try:
+			repaired, orphans = self._relink_known_device_ids()
+			if not repaired:
+				self.indiLOG.log(20,
+					"one-time check: every known entry with a device is already linked")
+			if orphans:
+				self.indiLOG.log(20,
+					f"{len(orphans)} known entr{'y' if len(orphans) == 1 else 'ies'} "
+					f"have no Indigo device — remove them under Plugins → "
+					f"Network Scanner → (Un)Ignore Devices, 'Stale entries'")
+		except Exception as e:
+			if not _benign_ipc_error(e):
+				self.indiLOG.log(40, f"relink of known device ids failed: {e}", exc_info=True)
 
 	###----------------------------------------------------------###
 	def _backfill_change_timestamps(self):
@@ -1358,6 +1390,30 @@ class Plugin(indigo.PluginBase):
 		if not mac:
 			return False
 		return name.startswith(self._getPrefixName() + mac.upper())
+
+	###----------------------------------------------------------###
+	def _display_name(self, name: str, mac: str = "") -> str:
+		"""Device name for a list row, with the auto-generated head removed.
+
+		_mac_to_device_name() builds names as  <prefix><MAC>  <friendly> , so a row
+		that already shows the MAC in its own column would repeat it.  Only that
+		exact head is removed, decided by _is_auto_name(), and only the remainder
+		is returned:
+
+		    Net_AA:BB:CC:DD:EE:FF  iPhone   ->  iPhone
+		    Net_AA:BB:CC:DD:EE:FF            ->  ""   (nothing but the head)
+
+		Any other name is returned verbatim, whitespace collapsed.  That matters
+		for names this plugin did not generate — a fingscan-migrated device such
+		as  FING-B4:FB:E4:29:F0:BD-Ubiquiti Inc-Net_-ping-only  carries its MAC in
+		the middle, and cutting at the MAC wherever it appeared turned the name
+		into the fragment  -Ubiquiti Inc-Net_-ping-only .
+		"""
+		if not name:
+			return ""
+		if mac and self._is_auto_name(name, mac):
+			name = name[len(self._getPrefixName() + mac.upper()):]
+		return " ".join(name.split())
 
 	###----------------------------------------------------------###
 	def _kill_tcpdump(self):
@@ -1879,6 +1935,17 @@ class Plugin(indigo.PluginBase):
 			# networkDevice devices so the columns reflect the new layout at once.
 			if _flip_changed:
 				self._apply_flip_address_notes(_new_flip)
+			# A running mDNS A/B test is toggling activeMdnsEnabled behind the
+			# scenes and would restore its own "original" value in its finally
+			# block — overwriting the value the user has just saved, which Indigo
+			# already wrote into pluginPrefs before this callback ran.  Tell the
+			# test to abandon that restore: an explicit save outranks it.
+			if getattr(self, "_mdns_ab_running", False):
+				self._mdns_ab_keep_saved = True
+				self.indiLOG.log(20,
+					"plugin config saved while the mDNS A/B test was running — test "
+					"aborted, and your saved Enable Active mDNS Query setting is kept")
+
 			# Signal all threads to stop
 			self.stopDelayedActionQueue()
 			self._stop_event.set()
@@ -3202,6 +3269,7 @@ class Plugin(indigo.PluginBase):
 
 			if sweep_enabled:
 				self._arp_sweep(iface)
+				self._bump_sweep_seq()   # completed sweeps — see _ab_wait_sweeps()
 
 			self._check_all_devices(iface)
 			self._check_external_devices()
@@ -3270,6 +3338,7 @@ class Plugin(indigo.PluginBase):
 			interval     = int(self.pluginPrefs.get("scanInterval", kDefaultPluginPrefs["scanInterval"]))
 			_cycle_start = time.time()
 			self._arp_sweep(iface)
+			self._bump_sweep_seq()       # completed sweeps — see _ab_wait_sweeps()
 			# True cycle period: subtract sweep duration, keep a minimum idle window
 			_idle = max(interval - (time.time() - _cycle_start), float(_PING_ONLY_INTERVAL_OFFLINE))
 			steps = int(_idle / 0.2)
@@ -3305,7 +3374,11 @@ class Plugin(indigo.PluginBase):
 		# mDNS devices to announce themselves.  Responses arrive on port 5353 and
 		# are processed automatically by the passive sniff thread — reveals devices
 		# hidden behind proxy-ARP APs whose MAC never shows up in arp -a.
-		if self.pluginPrefs.get("mdnsQueryEnabled", False):
+		# Fallback MUST be the declared default, not a hardcoded False: those
+		# disagreed, so a missing pref silently disabled the query even though
+		# kDefaultPluginPrefs and the config dialog both call it enabled.
+		self._mdns_mode_this_sweep = self._mdns_query_wanted()
+		if self._mdns_mode_this_sweep:
 			_send_mdns_query(iface)
 		try:
 			ip_int     = struct.unpack("!I", socket.inet_aton(net_str))[0]
@@ -7472,6 +7545,7 @@ class Plugin(indigo.PluginBase):
 	def _scan_loop_once(self, iface: str, sweep_enabled: bool):
 		if sweep_enabled:
 			self._arp_sweep(iface)
+			self._bump_sweep_seq()       # completed sweeps — see _ab_wait_sweeps()
 		self._check_all_devices(iface)
 		self._check_external_devices()
 		self._save_state()
@@ -7630,6 +7704,703 @@ class Plugin(indigo.PluginBase):
 		out += "\n"+sep
 		self.indiLOG.log(20,out)
 		return valuesDict   # button callback inside ConfigUI — must return valuesDict to keep dialog open
+
+	###----------------------------------------------------------###
+	def _ab_snapshot(self) -> dict:
+		"""Counters for one end of an A/B phase, taken from the seen-interval stats.
+
+		seen_stats counts every confirmed sighting of a device, bucketed by the
+		gap since the previous one, so the DIFFERENCE between two snapshots is
+		"how many times each device was seen during that window" — exactly what
+		an active mDNS query is supposed to improve.  Nothing is reset, so a
+		running test never disturbs the long-term histograms.
+		"""
+		bins, per_mac, pending, last_ts = {b: 0 for b in _SEEN_BINS}, {}, {}, {}
+		parts = {}
+		with self._known_lock:
+			for mac, entry in self._known.items():
+				raw   = entry.get("seen_stats", {})
+				total = 0
+				for b in _SEEN_BINS:
+					v = _as_int(raw.get(b, raw.get(str(b), 0)), 0)
+					bins[b] += v
+					total   += v
+				per_mac[mac] = total
+				# Collect the raw fields only — resolving the Indigo device name
+				# needs _dev_cache_lock, which MUST be taken before _known_lock
+				# (see the note in _register_device), so it happens after this
+				# block releases.
+				pending[mac] = (entry.get("ip", ""),
+				                entry.get("local_name", ""),
+				                entry.get("name", ""),
+				                entry.get("vendor", ""),
+				                entry.get("indigo_device_id"))
+				last_ts[mac] = entry.get("last_seen", 0) or 0
+			online_macs = {m for m, e in self._known.items() if e.get("online", False)}
+			online      = len(online_macs)
+			macs        = set(self._known)
+
+		labels = {}
+		for mac, (ip, local_name, known_name, vendor, dev_id) in pending.items():
+			# Prefer the Indigo device name: that is what the user sees in Indigo.
+			# _display_name drops the auto-generated "<prefix><MAC>" head, which
+			# would otherwise repeat the MAC already in the row; a device left with
+			# the bare generated name therefore yields "" and falls through.  Names
+			# this plugin did not generate are kept verbatim.
+			raw_dev_name = ""
+			if dev_id:
+				# _cache_name covers only THIS plugin's devices.  A _known entry can
+				# legitimately point at a device owned by another plugin — a
+				# fingscan leftover from the migration, for instance — and those are
+				# never in _dev_cache, so the cached name comes back empty and the
+				# row would end up nameless.  Fall back to a direct lookup, which
+				# sees any device regardless of owner.
+				raw_dev_name = self._cache_name(dev_id) or ""
+				if not raw_dev_name:
+					try:
+						raw_dev_name = indigo.devices[dev_id].name or ""
+					except Exception:
+						raw_dev_name = ""      # device deleted since it was linked
+			dev_name = self._display_name(raw_dev_name, mac)
+			mdns     = _strip_local_suffix((local_name or "").strip())
+			# Primary label: the Indigo device name, because that is what the user
+			# has to find and act on.  Fall back through the mDNS name, the stored
+			# name, the vendor, and finally the bare generated name.
+			tail = dev_name or mdns or known_name or ""
+			if not tail and vendor and vendor.strip().lower() != "unknown":
+				tail = vendor
+			if not tail:
+				# The bare generated name repeats the MAC, which is why it is not
+				# used earlier, but "this device does exist in Indigo" beats
+				# showing nothing at all.
+				tail = raw_dev_name
+			# Append the mDNS name when it adds something the primary does not
+			# already say.  Several devices of one model announce the SAME mDNS
+			# name — three Sonos players all answer "sonoszp" — so on its own it
+			# cannot tell them apart, while the Indigo name alone does not show
+			# that mDNS answered at all.  Both together identify the device and
+			# how it was found.
+			if mdns and mdns.lower() not in tail.lower():
+				tail = f"{tail}  ({mdns})" if tail else mdns
+			# pingOnly devices are tracked by the dedicated ICMP probe, which writes
+			# last_seen directly and never calls _register_device — so they can
+			# never bump seen_stats and would look permanently unseen.  Mark them.
+			if dev_id:
+				try:
+					if self._cache_props(dev_id).get("pingMode") == "pingOnly":
+						tail = f"{tail}  [pingOnly]" if tail else "[pingOnly]"
+				except Exception:
+					pass
+			labels[mac] = _ignore_row(mac, ip, tail)
+			# Columns for the unseen listings, kept apart so they can be aligned:
+			# the merged label cannot be, because the name length varies.
+			# Last column: the LIVE Indigo name, else the name this entry still
+			# carries from when it had a device — an orphan would otherwise read
+			# "none" and lose the only record of what it was called.
+			_live_name = self._display_name(raw_dev_name, mac) or raw_dev_name
+			if not _live_name and known_name:
+				_live_name = f"({self._display_name(known_name, mac) or known_name})"
+			parts[mac] = (ip, mdns, _live_name)
+		return {"bins": bins, "per_mac": per_mac, "online": online, "parts": parts,
+		        "online_macs": online_macs, "macs": macs, "labels": labels,
+		        "last_ts": last_ts}
+
+	###----------------------------------------------------------###
+	@staticmethod
+	def _ab_delta(before: dict, after: dict) -> dict:
+		"""What happened between two snapshots."""
+		bins = {b: after["bins"][b] - before["bins"][b] for b in _SEEN_BINS}
+		seen = {m for m, n in after["per_mac"].items()
+		        if n > before["per_mac"].get(m, 0)}
+		# Not seen = known throughout the phase but its sighting count never moved.
+		# Devices discovered DURING the phase are excluded: they were not known for
+		# the whole window, so "not seen" would be meaningless for them.
+		missing = (after["macs"] & before["macs"]) - seen
+		return {"bins":      bins,
+		        "sightings": sum(bins.values()),
+		        "seen":      seen,
+		        "missing":   missing,
+		        "devices":   len(seen),
+		        "new_macs":  after["macs"] - before["macs"],
+		        "labels":    after["labels"],
+		        "parts":     after["parts"],
+		        "last_ts":   after["last_ts"],
+		        "online_macs": after["online_macs"],
+		        "online":    after["online"]}
+
+	###----------------------------------------------------------###
+	def _mdns_query_wanted(self) -> bool:
+		"""Should THIS sweep send the active mDNS query?
+
+		"on" / "off" are fixed.  "auto" alternates in blocks of
+		_MDNS_AUTO_BLOCK sweeps, for ever, during normal scanning — so the
+		comparison keeps accumulating over days instead of over the few minutes
+		an A/B run can cover.  Four short runs here each landed inside their own
+		noise, so a long baseline is the only way the question gets answered.
+
+		Legacy installs stored a BOOLEAN in this pref; True/False still read as
+		on/off so an upgrade does not silently turn the query off.
+		"""
+		raw = self.pluginPrefs.get("activeMdnsEnabled",
+		                           kDefaultPluginPrefs["activeMdnsEnabled"])
+		if raw is True:
+			return True
+		if raw is False:
+			return False
+		mode = str(raw).strip().lower()
+		if mode == "auto":
+			return (self._sweep_seq // max(1, _MDNS_AUTO_BLOCK)) % 2 == 1
+		if mode in ("off", "false", "0", "no"):
+			return False
+		return True      # "on", and anything unrecognised
+
+	###----------------------------------------------------------###
+	def _auto_mdns_account(self):
+		"""Attribute the sightings of the sweep just finished to its mDNS mode.
+
+		Only meaningful in "auto": each completed sweep adds its own sighting
+		delta to the on- or off-bucket, so the totals can be compared later with
+		the same spread-aware verdict the A/B test uses.
+		"""
+		try:
+			total, per_mac = 0, {}
+			with self._known_lock:
+				for mac, e in self._known.items():
+					raw = e.get("seen_stats", {})
+					n   = 0
+					for b in _SEEN_BINS:
+						n += _as_int(raw.get(b, raw.get(str(b), 0)), 0)
+					per_mac[mac] = n
+					total       += n
+			if self._auto_last_total is not None:
+				d   = total - self._auto_last_total
+				key = "on" if getattr(self, "_mdns_mode_this_sweep", True) else "off"
+				# Devices whose own count moved this sweep.  Coverage is the metric
+				# to trust: the sniffer throttles each MAC to one registration per
+				# _THROTTLE_SECS and the mDNS branch shares that throttle, so a
+				# prompted mDNS reply can consume the slot an ARP sighting would
+				# have used — which depresses the SIGHTING count without any device
+				# going unseen.  Coverage is immune to that.
+				prev  = self._auto_last_per_mac or {}
+				moved = [m for m, n in per_mac.items() if n > prev.get(m, 0)]
+				cov   = len(moved)
+				if 0 <= d < 100000:
+					st = self._auto_stats.setdefault(key, {"sweeps": 0, "sightings": 0,
+					                                       "phases": [], "devices": []})
+					st.setdefault("devices", [])
+					st["sweeps"]    += 1
+					st["sightings"] += d
+					st["phases"].append(d)
+					st["devices"].append(cov)
+					# Union of everything ever seen in this mode — this is what makes
+					# "seen only with the query ON/OFF" answerable from a long run
+					# instead of from one 8-minute test.
+					_seen = set(st.setdefault("seen_macs", []))
+					_seen.update(moved)
+					st["seen_macs"] = sorted(_seen)
+					del st["phases"][:-200]          # keep the last 200 only
+					del st["devices"][:-200]
+					self.pluginPrefs["mdnsAutoStats"] = json.dumps(self._auto_stats)
+			self._auto_last_total   = total
+			self._auto_last_per_mac = per_mac
+		except Exception as e:
+			if not _benign_ipc_error(e):
+				self.indiLOG.log(30, f"auto-mDNS accounting: {e}")
+
+	###----------------------------------------------------------###
+	def printMdnsAutoStats(self, valuesDict=None, menuId="", *args):
+		"""Menu: print what "auto" mode has accumulated so far."""
+		st = self._auto_stats or {}
+		on, off = st.get("on", {}), st.get("off", {})
+		if not on.get("sweeps") or not off.get("sweeps"):
+			self.indiLOG.log(20,
+				"mDNS auto totals: not enough data yet — set Enable Active mDNS "
+				"Query to 'auto' and let it run for a few hours")
+			return True
+		def _stat(vals):
+			vals = vals or [0]
+			n = len(vals)
+			m = sum(vals) / float(n)
+			sd = ((sum((v - m) ** 2 for v in vals) / float(n - 1)) ** 0.5) if n > 1 else 0.0
+			return m, sd, n
+		def _line(name, a, b, fmt="{:>14.1f}"):
+			return f"{name:<22}" + fmt.format(a) + fmt.format(b) + "\n"
+		def _verdict(what, m_on, sd_on, n_on, m_off, sd_off, n_off):
+			dm = m_on - m_off
+			se = ((sd_on ** 2) / max(1, n_on) + (sd_off ** 2) / max(1, n_off)) ** 0.5
+			if min(n_on, n_off) < 3:
+				return f"  {what:<10} inconclusive — only {min(n_on, n_off)} sweep(s) a side\n"
+			if abs(dm) < 2 * se:
+				return (f"  {what:<10} no difference  ({dm:+.1f} per sweep, "
+				        f"needs {2 * se:.1f})\n")
+			return (f"  {what:<10} {'ON' if dm > 0 else 'OFF'} ahead by {abs(dm):.1f} "
+			        f"per sweep  (needs {2 * se:.1f})\n")
+
+		cm_on, csd_on, cn_on    = _stat(on.get("devices"))
+		cm_off, csd_off, cn_off = _stat(off.get("devices"))
+		sm_on, ssd_on, sn_on    = _stat(on.get("phases"))
+		sm_off, ssd_off, sn_off = _stat(off.get("phases"))
+
+		out  = "\n" + "=" * 72 + "\n"
+		out += "mDNS auto mode — accumulated during normal scanning\n"
+		out += "=" * 72 + "\n"
+		out += f"{'':<22}{'query ON':>14}{'query OFF':>14}\n"
+		out += f"{'sweeps':<22}{on['sweeps']:>14}{off['sweeps']:>14}\n"
+		out += _line("devices per sweep", cm_on, cm_off)
+		out += _line("  spread (sd)", csd_on, csd_off)
+		out += _line("sightings per sweep", sm_on, sm_off)
+		out += _line("  spread (sd)", ssd_on, ssd_off)
+		out += "-" * 72 + "\n"
+		out += "VERDICT\n"
+		out += _verdict("coverage", cm_on, csd_on, cn_on, cm_off, csd_off, cn_off)
+		out += _verdict("sightings", sm_on, ssd_on, sn_on, sm_off, ssd_off, sn_off)
+		out += ("\nCoverage (devices seen per sweep) is the metric to trust.  The sniffer\n"
+		        "allows one registration per MAC per 30 s and the mDNS branch shares that\n"
+		        "throttle, so a prompted reply can take the slot an ARP sighting would\n"
+		        "have used - that lowers SIGHTINGS without any device going unseen.\n")
+
+		# ── which devices, over the whole accumulated run ──────────────────
+		snap   = self._ab_snapshot()
+		parts  = snap["parts"]
+		ages   = snap["last_ts"]
+		upnow  = snap["online_macs"]
+		seen_on  = set(on.get("seen_macs", []))
+		seen_off = set(off.get("seen_macs", []))
+		never    = set(snap["macs"]) - seen_on - seen_off
+
+		def _tbl(title, macs, show_age=True):
+			o = f"\n{'-' * 86}\n{title}: {len(macs)}\n"
+			if not macs:
+				return o
+			o += (f"  {'ip':<15} {'mac':<17} {'last seen':<11} "
+			      f"{'mDNS/ARP name':<22} indigo name  (stored name)\n")
+			for m in sorted(macs, key=lambda x: ages.get(x, 0)):
+				_ip, _mdns, _dev = parts.get(m, ("", "", ""))
+				o += (f"  {_ip_for_notes(_ip):<15} {m:<17} "
+				      f"{self._ab_age(ages.get(m, 0)):<11} "
+				      f"{(_mdns or '-'):<22} {_dev or 'none'}\n")
+			return o
+
+		out += _tbl("seen ONLY with the query ON  (the query found these)",
+		            seen_on - seen_off)
+		out += _tbl("seen ONLY with the query OFF (noise, or they left)",
+		            seen_off - seen_on)
+		out += _tbl("never seen in either mode, but ONLINE (tracked by ping/probe)",
+		            never & upnow)
+		out += _tbl("never seen in either mode and offline  (deletion candidates)",
+		            never - upnow)
+		out += "\n" + "=" * 72
+		self.indiLOG.log(20, out)
+		return True
+
+	###----------------------------------------------------------###
+	def resetMdnsAutoStats(self, valuesDict=None, menuId="", *args):
+		"""Menu: clear the accumulated auto-mode totals."""
+		self._auto_stats      = {}
+		self._auto_last_total = None
+		self.pluginPrefs["mdnsAutoStats"] = "{}"
+		self.indiLOG.log(20, "mDNS auto totals reset")
+		return True
+
+	###----------------------------------------------------------###
+	def _bump_sweep_seq(self):
+		"""Record that one ARP sweep finished, and track the real cycle period.
+
+		The period is NOT scanInterval: the scan loop sleeps
+		max(interval - sweep_duration, _PING_ONLY_INTERVAL_OFFLINE), so once a
+		sweep takes a noticeable share of the interval the floor applies and the
+		cycle runs longer.  Measured on a 60 s interval it came out near 100 s,
+		which is why the A/B estimate has to use the observed value.
+		"""
+		now = time.time()
+		if self._sweep_last_ts:
+			d = now - self._sweep_last_ts
+			if 0 < d < 3600:
+				self._sweep_cycle_secs = (d if not self._sweep_cycle_secs
+				                          else 0.7 * self._sweep_cycle_secs + 0.3 * d)
+		self._sweep_last_ts = now
+		self._sweep_seq    += 1
+		if str(self.pluginPrefs.get("activeMdnsEnabled", "")).strip().lower() == "auto":
+			self._auto_mdns_account()
+
+	###----------------------------------------------------------###
+	@staticmethod
+	def _ab_age(ts) -> str:
+		"""last_seen epoch → how long ago, for the unseen listings.
+
+		This is what separates a device that dropped out during the test from a
+		stale entry for hardware that was retired weeks ago — both land in the
+		same list otherwise.
+		"""
+		ts = _as_int(ts, 0)
+		if not ts:
+			return "never seen"
+		d = time.time() - ts
+		if d < 0:
+			return "just now"
+		if d < 60:
+			return f"{int(d)}s ago"
+		if d < 3600:
+			return f"{int(d // 60)}m ago"
+		if d < 86400:
+			return f"{int(d // 3600)}h {int((d % 3600) // 60)}m ago"
+		return f"{int(d // 86400)}d {int((d % 86400) // 3600)}h ago"
+
+	###----------------------------------------------------------###
+	def _ab_wait_sweeps(self, n: int) -> bool:
+		"""Block until n more ARP sweeps have COMPLETED.  False if interrupted.
+
+		Phases are measured in sweeps, not seconds, because sightings arrive in a
+		burst per sweep.  A wall-clock phase of 120 s against a 60 s interval
+		catches either 2 or 3 of those bursts depending on where it happens to
+		start, which is worth roughly 6 % of the total — enough to decide the
+		result on its own.  Counting completed sweeps removes that entirely.
+		"""
+		target = self._sweep_seq + n
+		while self._sweep_seq < target:
+			if self._stop_event.wait(0.5):
+				return False
+		return True
+
+	###----------------------------------------------------------###
+	@staticmethod
+	def _ab_merge(acc: dict, d: dict) -> dict:
+		"""Accumulate one phase delta into a running total for that label."""
+		if not acc:
+			return {"bins": dict(d["bins"]), "sightings": d["sightings"],
+			        "seen": set(d["seen"]), "missing": set(d["missing"]),
+			        "devices": len(d["seen"]), "new_macs": set(d["new_macs"]),
+			        "labels": dict(d["labels"]), "last_ts": dict(d["last_ts"]),
+			        "parts": dict(d["parts"]),
+			        "online": d["online"],
+			        "online_macs": set(d["online_macs"]),
+			        # per-phase figures, kept so the report can show the spread:
+			        # the union over rounds rewards VARIABILITY, so a label whose
+			        # coverage wobbles between rounds ends up with a bigger union
+			        # than a label that saw the same set every time.
+			        "per_round_sightings": [d["sightings"]],
+			        "per_round_devices":   [len(d["seen"])]}
+		for b, v in d["bins"].items():
+			acc["bins"][b] = acc["bins"].get(b, 0) + v
+		acc["sightings"] += d["sightings"]
+		# Seen in ANY round of this label counts as seen; NOT seen means it was
+		# missed in EVERY round, so the sets union and intersect respectively.
+		acc["seen"]    |= d["seen"]
+		acc["missing"] &= d["missing"]
+		acc["new_macs"] |= d["new_macs"]
+		acc["labels"].update(d["labels"])
+		acc["last_ts"].update(d["last_ts"])
+		acc["parts"].update(d["parts"])
+		acc["devices"]     = len(acc["seen"])
+		acc["online"]      = d["online"]
+		acc["online_macs"] = set(d["online_macs"])
+		acc["per_round_sightings"].append(d["sightings"])
+		acc["per_round_devices"].append(len(d["seen"]))
+		return acc
+
+	###----------------------------------------------------------###
+	def _mdns_ab_worker(self, sweeps: int, rounds: int, original):
+		"""A/B test the active mDNS query, measured in whole sweeps over N rounds.
+
+		Each round runs an OFF phase then an ON phase, both exactly `sweeps`
+		completed sweeps long and both starting on a sweep boundary.  Alternating
+		over several rounds cancels slow drift — devices joining or leaving while
+		the test runs — which a single pair cannot distinguish from a real effect.
+		"""
+		try:
+			interval = _as_int(self.pluginPrefs.get("scanInterval",
+			                   kDefaultPluginPrefs["scanInterval"]), 60)
+			# Use the MEASURED sweep-to-sweep period when one is known: a sweep
+			# that takes a while pushes the cycle past scanInterval, so estimating
+			# from the interval alone reads far too optimistic.
+			cycle = self._sweep_cycle_secs or float(interval)
+			total = int((1 + rounds * 2 * sweeps) * cycle)
+			how   = (f"measured cycle {cycle:.0f}s" if self._sweep_cycle_secs
+			         else f"scanInterval {interval}s, cycle not measured yet")
+			self.indiLOG.log(20,
+				f"mDNS A/B test: (OFF+ON) x {rounds}, {sweeps} sweep(s) per phase, "
+				f"{how} → roughly {total // 60} min {total % 60}s in total "
+				f"(1 sweep to line up, then {rounds * 2 * sweeps} measured)")
+
+			# Line up with the sweep cycle ONCE.  After that every phase both ends
+			# on a sweep boundary and begins on one, so the setting is flipped while
+			# the sweep loop is idling between cycles and the very next sweep runs
+			# entirely under the new value.  No sweep has to be thrown away per
+			# phase, and the snapshots chain with no dead time between them.
+			if not self._ab_wait_sweeps(1):
+				self.indiLOG.log(20, "mDNS A/B test: aborted — threads restarted")
+				return
+			before = self._ab_snapshot()
+
+			agg = {"mDNS query OFF": {}, "mDNS query ON": {}}
+			for rnd in range(1, rounds + 1):
+				for label, enabled in (("mDNS query OFF", False), ("mDNS query ON", True)):
+					# Force the fixed modes: inheriting "auto" would have the query
+					# flipping underneath the phase it is supposed to measure.
+					self.pluginPrefs["activeMdnsEnabled"] = "on" if enabled else "off"
+					if not self._ab_wait_sweeps(sweeps):
+						self.indiLOG.log(20, "mDNS A/B test: aborted — threads restarted")
+						return
+					after = self._ab_snapshot()
+					d     = self._ab_delta(before, after)
+					before = after            # chain: no gap between phases
+					agg[label] = self._ab_merge(agg[label], d)
+					self.indiLOG.log(20,
+						f"mDNS A/B test: (OFF+ON) {rnd}/{rounds} '{label}' done — "
+						f"{d['sightings']} sighting(s), {len(d['seen'])} device(s)")
+
+			self._ab_report(agg, sweeps, rounds, interval)
+		except Exception as e:
+			if not _benign_ipc_error(e):
+				self.indiLOG.log(40, f"mDNS A/B test failed: {e}", exc_info=True)
+		finally:
+			# Put the pref back, however the test ended — unless the user saved the
+			# plugin config meanwhile, in which case their value is already in
+			# pluginPrefs and restoring would silently undo it.
+			if getattr(self, "_mdns_ab_keep_saved", False):
+				self.indiLOG.log(20,
+					f"mDNS A/B test: activeMdnsEnabled left at the value you saved "
+					f"({self.pluginPrefs.get('activeMdnsEnabled')}), not restored to {original}")
+			else:
+				self.pluginPrefs["activeMdnsEnabled"] = original
+				self.indiLOG.log(20, f"mDNS A/B test: activeMdnsEnabled restored to {original}")
+			self._mdns_ab_keep_saved = False
+			self._mdns_ab_running    = False
+
+	###----------------------------------------------------------###
+	def _ab_report(self, results: dict, sweeps: int, rounds: int, interval: int):
+		"""Print the two phases side by side."""
+		on, off = results.get("mDNS query ON"), results.get("mDNS query OFF")
+		if not on or not off:
+			return
+		W = 26
+		out  = "\n" + "=" * 72 + "\n"
+		out += (f"mDNS A/B test — (OFF+ON) x {rounds}, {sweeps} sweep(s) per phase, "
+		        f"scanInterval {interval}s\n")
+		out += "=" * 72 + "\n"
+		out += f"{'':<{W}}{'query ON':>12}{'query OFF':>12}{'difference':>14}\n"
+		# "no ARP/sniff sighting" and "devices seen" sum to the known population, so
+		# a +2 on one is always a -2 on the other — the same devices counted twice.
+		# What actually matters is how many of the unseen were UP at the time, so
+		# that gets its own row; the rest are simply offline.
+		_up = on.get("online_macs", set()) | off.get("online_macs", set())
+		on["unseen_online"]  = on["missing"]  & _up
+		off["unseen_online"] = off["missing"] & _up
+		on["unseen_offline"]  = on["missing"]  - _up
+		off["unseen_offline"] = off["missing"] - _up
+		for key, name in (("sightings", "sightings total"),
+		                  ("devices",   "devices seen at least once"),
+		                  ("unseen_online",  "  unseen though ONLINE"),
+		                  ("unseen_offline", "  unseen and offline"),
+		                  ("online",    "devices online at end")):
+			_on  = len(on[key])  if isinstance(on[key],  set) else on[key]
+			_off = len(off[key]) if isinstance(off[key], set) else off[key]
+			out += f"{name:<{W}}{_on:>12}{_off:>12}{_on - _off:>+14}\n"
+		out += f"{'devices first discovered':<{W}}{len(on['new_macs']):>12}{len(off['new_macs']):>12}\n"
+		if rounds > 1:
+			# "devices seen at least once" is a UNION over rounds, so it can favour
+			# the side whose coverage merely varied more.  Print the per-round
+			# figures so a 2-device difference can be read against its own spread.
+			_fmt = lambda v: " ".join(f"{x}" for x in v)
+			out += "-" * 72 + "\n"
+			out += f"{'per round, sightings':<{W}}{_fmt(on['per_round_sightings']):>12}{_fmt(off['per_round_sightings']):>12}\n"
+			out += f"{'per round, devices seen':<{W}}{_fmt(on['per_round_devices']):>12}{_fmt(off['per_round_devices']):>12}\n"
+			out += f"{'(above two are unions)':<{W}}\n"
+		out += "-" * 72 + "\n"
+		out += f"{'gap since last sighting':<{W}}{'query ON':>12}{'query OFF':>12}{'difference':>14}\n"
+		for b in _SEEN_BINS:
+			d = on["bins"][b] - off["bins"][b]
+			out += f"{_SEEN_LABEL[b]:<{W}}{on['bins'][b]:>12}{off['bins'][b]:>12}{d:>+14}\n"
+		for label, res in (("query ON", on), ("query OFF", off)):
+			if res["new_macs"]:
+				out += f"\nfirst discovered during {label}: " + ", ".join(sorted(res["new_macs"]))
+
+		# ── which devices went missing, and in which phase ──────────────────
+		labels   = {**off.get("labels", {}), **on.get("labels", {})}
+		only_on  = on["seen"]  - off["seen"]     # answered only while querying
+		only_off = off["seen"] - on["seen"]
+		never    = on["missing"] & off["missing"]
+		# A device can be perfectly alive and still never bump seen_stats: that
+		# counter lives only in _register_device (ARP sweep hit / sniffed packet),
+		# while the per-device ICMP+TCP probe writes last_seen directly.  So split
+		# the never-seen set by the online flag instead of implying they are down.
+		up = on.get("online_macs", set()) | off.get("online_macs", set())
+		ages  = {**off.get("last_ts", {}), **on.get("last_ts", {})}
+		parts = {**off.get("parts", {}),   **on.get("parts", {})}
+		# cap=None means list EVERY entry: the offline set is the cleanup queue, so
+		# truncating it to 40 hid exactly the rows the user needs to act on.  The
+		# other sections stay capped — they are comparisons, not worklists.
+		for title, macs, show_age, cap in (
+				("seen ONLY with the query ON  (the query found these)",
+				 only_on, False, _AB_LIST_MAX),
+				("seen ONLY with the query OFF (noise, or they left)",
+				 only_off, False, _AB_LIST_MAX),
+				("no ARP/sniff sighting, but ONLINE (tracked by ping/probe)",
+				 never & up, True, None),
+				("no sighting and offline  (last seen when?)",
+				 never - up, True, None)):
+			out += f"\n{'-' * 72}\n{title}: {len(macs)}\n"
+			if not macs:
+				continue
+			# Oldest first when the age is shown: the stale entries worth deleting
+			# collect at the top, and anything that dropped during the test is last.
+			if show_age:
+				order = sorted(macs, key=lambda m: ages.get(m, 0))
+			else:
+				order = sorted(macs, key=lambda m: labels.get(m, m))
+			shown = order if cap is None else order[:cap]
+			if show_age:
+				# ip | mac | last seen | mDNS/ARP name | Indigo device name
+				out += (f"  {'ip':<15} {'mac':<17} {'last seen':<11} "
+				        f"{'mDNS/ARP name':<22} indigo name  (stored name)\n")
+			for m in shown:
+				if not show_age:
+					out += f"  {labels.get(m, m)}\n"
+					continue
+				_ip, _mdns, _dev = parts.get(m, ("", "", ""))
+				out += (f"  {_ip_for_notes(_ip):<15} {m:<17} "
+				        f"{self._ab_age(ages.get(m, 0)):<11} "
+				        f"{(_mdns or '-'):<22} {_dev or 'none'}\n")
+			if cap is not None and len(macs) > cap:
+				out += f"  ... and {len(macs) - cap} more\n"
+		# ── verdict: is the difference bigger than the run's own noise? ─────
+		# Three real runs of this test gave ON +14, OFF +14, ON +42 and OFF +8 on
+		# the same network — the sign flipped because a single sweep per phase
+		# varies by ~10% on its own.  So compare the gap against the observed
+		# per-phase spread instead of letting the reader treat any gap as a result.
+		# Compare the gap against the standard error of the DIFFERENCE, not
+		# against a raw spread: with 2 phases a side, sd is itself barely
+		# estimated, and "gap > sd" fired on noise — four runs on one network
+		# gave ON +42, OFF +8, OFF +29 and OFF +29 while the pooled means sat
+		# under 3 apart.  Sample sd (n-1), and n < 3 is declared inconclusive
+		# outright rather than dressed up with a threshold it cannot support.
+		_sp = {}
+		for lbl, res in (("ON", on), ("OFF", off)):
+			vals = res.get("per_round_sightings") or [res["sightings"]]
+			n    = len(vals)
+			mean = sum(vals) / float(n)
+			sd   = ((sum((v - mean) ** 2 for v in vals) / float(n - 1)) ** 0.5
+			        if n > 1 else 0.0)
+			_sp[lbl] = (mean, sd, min(vals), max(vals), n)
+		_dm = _sp["ON"][0] - _sp["OFF"][0]
+		_n_on, _n_off = _sp["ON"][4], _sp["OFF"][4]
+		_se = ((_sp["ON"][1] ** 2) / max(1, _n_on)
+		       + (_sp["OFF"][1] ** 2) / max(1, _n_off)) ** 0.5
+		out += "-" * 72 + "\n"
+		out += (f"per phase: ON {_sp['ON'][0]:.1f} sd {_sp['ON'][1]:.1f} "
+		        f"(range {_sp['ON'][2]}-{_sp['ON'][3]}, n={_n_on}) | "
+		        f"OFF {_sp['OFF'][0]:.1f} sd {_sp['OFF'][1]:.1f} "
+		        f"(range {_sp['OFF'][2]}-{_sp['OFF'][3]}, n={_n_off})\n")
+		out += f"difference {_dm:+.1f} per phase, standard error {_se:.1f}\n"
+		if min(_n_on, _n_off) < 3:
+			out += (f"VERDICT:  INCONCLUSIVE — {min(_n_on, _n_off)} phase(s) per side is too\n"
+			        f"          few to tell a {abs(_dm):.0f} difference from noise, whichever\n"
+			        f"          way it points.  Raise the factor to 3 or more, or use\n"
+			        f"          \"auto\" mode, which keeps score indefinitely.\n")
+		elif abs(_dm) < 2 * _se:
+			out += (f"VERDICT:  no difference demonstrated — the gap is under twice the\n"
+			        f"          standard error ({2 * _se:.1f}).  Do not read the totals above\n"
+			        f"          as a result.\n")
+		else:
+			out += (f"VERDICT:  {'ON' if _dm > 0 else 'OFF'} is ahead by {abs(_dm):.1f} per phase,\n"
+			        f"          more than twice the standard error ({2 * _se:.1f}).  Repeat once\n"
+			        f"          to confirm before acting on it.\n")
+		out += "\n" + "=" * 72 + "\n"
+		out += ("NOTE: \"seen\" here means seen_stats moved, and that counter is bumped\n"
+		        "ONLY by the ARP sweep and the packet sniffer (_register_device).  The\n"
+		        "per-device ICMP/TCP probe writes last_seen directly, so a device kept\n"
+		        "alive that way - every pingOnly device, and anything that answers ping\n"
+		        "but is absent from arp -a - can be up and responding yet never appear\n"
+		        "as seen.  Those are listed as ONLINE above, not as offline, and\n"
+		        "pingOnly ones are tagged.  A device whose normal interval exceeds the\n"
+		        "phase will also show up unseen every run, and devices discovered\n"
+		        "during a phase are left out of its unseen count.\n")
+		out += ("NOTE: phases are whole sweeps and the setting is flipped between\n"
+		        "cycles, so neither side can gain a burst from where the clock fell -\n"
+		        "the artefact that made a wall-clock phase favour whichever ran\n"
+		        "first.  OFF runs first in each pair.  Devices still come and go on\n"
+		        "their own: if the two sides are within a few per cent, treat it as\n"
+		        "no difference and raise the factor.\n")
+		out += "=" * 72
+		self.indiLOG.log(20, out)
+
+	###----------------------------------------------------------###
+	def startMdnsABTest(self, valuesDict=None, menuId="", *args):
+		"""Menu: A/B test the active mDNS query, then print a comparison.
+
+		MUST return True / False (or a (True, valuesDict) tuple), NEVER valuesDict:
+		this is a MenuItem-level CallbackMethod, and Indigo subscripts the result
+		as a tuple during its UiValidate step.  Handing back the indigo.Dict makes
+		that read valuesDict[0] and raises
+
+		    Dict.__getitem__(Dict, int) did not match C++ signature
+
+		Returning valuesDict is correct only for FIELD (button) callbacks.
+		"""
+		if getattr(self, "_mdns_ab_running", False):
+			self.indiLOG.log(30, "mDNS A/B test already running — ignoring")
+			return True
+		def _field(key, default):
+			try:
+				return _as_int(valuesDict.get(key, "") or "", default) if valuesDict is not None else default
+			except Exception:
+				return default
+		sweeps = max(1, min(_field("phaseSweeps", 1), 60))
+		rounds = max(1, min(_field("abRounds",    2), 20))
+		self._mdns_ab_running = True
+		original = self.pluginPrefs.get("activeMdnsEnabled",
+		                                kDefaultPluginPrefs["activeMdnsEnabled"])
+		threading.Thread(target=self._mdns_ab_worker, args=(sweeps, rounds, original),
+		                 daemon=True, name="NS-mDNS-ABTest").start()
+		return True
+
+	###----------------------------------------------------------###
+	def printUnseenDevices(self, valuesDict=None, *args):
+		"""Menu: the stale / unseen list on demand, without running an A/B test.
+
+		Same columns and grouping as the mDNS report, but lifetime rather than
+		over a test window: "never sighted" means seen_stats has never moved for
+		that MAC.  Reuses _ab_snapshot() so the two can never disagree.
+		"""
+		snap   = self._ab_snapshot()
+		parts  = snap["parts"]
+		ages   = snap["last_ts"]
+		up     = snap["online_macs"]
+		never  = {m for m, v in snap["per_mac"].items() if v == 0}
+		offline_any = {m for m in snap["macs"] if m not in up}
+
+		def _tbl(title, macs):
+			o  = f"\n{'-' * 86}\n{title}: {len(macs)}\n"
+			if not macs:
+				return o
+			o += (f"  {'ip':<15} {'mac':<17} {'last seen':<11} "
+			      f"{'mDNS/ARP name':<22} indigo name  (stored name)\n")
+			for m in sorted(macs, key=lambda x: ages.get(x, 0)):
+				_ip, _mdns, _dev = parts.get(m, ("", "", ""))
+				o += (f"  {_ip_for_notes(_ip):<15} {m:<17} "
+				      f"{self._ab_age(ages.get(m, 0)):<11} "
+				      f"{(_mdns or '-'):<22} {_dev or 'none'}\n")
+			return o
+
+		out  = "\n" + "=" * 86 + "\n"
+		out += (f"Unseen / stale devices — {len(snap['macs'])} known, "
+		        f"{len(up)} online, {len(never)} never sighted\n")
+		out += "=" * 86 + "\n"
+		out += _tbl("ONLINE but never an ARP/sniff sighting (tracked by ping/probe)",
+		            never & up)
+		out += _tbl("OFFLINE and never sighted  (oldest first — deletion candidates)",
+		            never - up)
+		out += _tbl("OFFLINE but sighted before  (oldest first)",
+		            offline_any - never)
+		out += "\n" + "-" * 86 + "\n"
+		out += ("seen_stats is bumped ONLY by the ARP sweep and the sniffer, so a device\n"
+		        "kept alive by the ICMP/TCP probe can be online and never counted as\n"
+		        "sighted — those are in the first group, not the second.  Entries with no\n"
+		        "Indigo device (stored name in brackets, indigo name 'none') can be removed\n"
+		        "under (Un)Ignore Devices → Stale entries.\n")
+		out += "=" * 86
+		self.indiLOG.log(20, out)
+		return valuesDict
 
 	###----------------------------------------------------------###
 	def resetSeenStats(self, valuesDict=None, *args):
@@ -8204,6 +8975,147 @@ MENU ITEMS  (Plugins -> Network Scanner)
 		return mac2ip, ip2mac
 
 	###----------------------------------------------------------###
+	def _known_orphans(self) -> list:
+		"""[(mac, entry)] for _known entries with no resolvable Indigo device.
+
+		Thin wrapper: the work is in _relink_known_device_ids(), which is also the
+		one-time upgrade step run from startup().
+
+		These are unreachable from the rest of the dialog: the Active Devices list
+		is built by iterating indigo.devices, so an entry whose device was deleted
+		(or never created) cannot be selected, ignored or removed there — it just
+		keeps turning up in the A/B report's unseen lists for ever.  A device owned
+		by ANOTHER plugin still resolves and is therefore not an orphan.
+		"""
+		return self._relink_known_device_ids()[1]
+
+	###----------------------------------------------------------###
+	def _relink_known_device_ids(self):
+		"""Repair indigo_device_id by MAC lookup.  Returns (repaired, orphans).
+
+		repaired: {mac: dev_id} written back into _known and persisted.
+		orphans:  [(mac, entry)] with no device of ours at all.
+		"""
+		# Our own devices, indexed by their MAC state — the second chance below.
+		by_mac = {}
+		for dev in indigo.devices.iter(PLUGIN_ID):
+			if dev.deviceTypeId != NETWORK_DEVICE_TYPE_ID:
+				continue
+			_m = (dev.states.get("MACNumber", "") or "").lower()
+			if _m:
+				by_mac[_m] = dev.id
+
+		with self._known_lock:
+			snap = {m: dict(e) for m, e in self._known.items()}
+		out, repaired = [], {}
+		for mac, entry in snap.items():
+			dev_id = entry.get("indigo_device_id")
+			alive  = False
+			if dev_id:
+				try:
+					indigo.devices[dev_id]
+					alive = True
+				except Exception:
+					alive = False
+			if alive:
+				continue
+			# A missing or dangling id does NOT prove the device is gone: the link
+			# can be lost on its own (51 entries here lost theirs in one batch on
+			# one evening, 34 of them still carrying our own "Net_<MAC>" names).
+			# Look the MAC up among our devices before calling it an orphan —
+			# otherwise this list would offer to delete entries whose Indigo
+			# device still exists, and the deletion would look justified.
+			found = by_mac.get(mac)
+			if found:
+				repaired[mac] = found
+				continue
+			out.append((mac, entry))
+
+		if repaired:
+			with self._known_lock:
+				for mac, dev_id in repaired.items():
+					if mac in self._known:
+						self._known[mac]["indigo_device_id"] = dev_id
+			self._save_state()
+			self.indiLOG.log(20,
+				f"relinked {len(repaired)} known entr{'y' if len(repaired) == 1 else 'ies'} "
+				f"to their Indigo device by MAC: "
+				+ ", ".join(f"{m}→{i}" for m, i in sorted(repaired.items())))
+		return repaired, out
+
+	###----------------------------------------------------------###
+	def _dialog_deletes(self, valuesDict) -> set:
+		"""MACs marked for removal from _known in this dialog session."""
+		if valuesDict is None:
+			return set()
+		raw = valuesDict.get("pendingDeleteMacs", "") or ""
+		return {m.strip().lower() for m in raw.split(",") if m.strip()}
+
+	###----------------------------------------------------------###
+	def getKnownOrphanList(self, filter="", valuesDict=None, typeId="", targetId=0):
+		"""Known entries with no Indigo device, oldest sighting first."""
+		marked = self._dialog_deletes(valuesDict)
+		rows   = [(m, e) for m, e in self._known_orphans() if m not in marked]
+		rows.sort(key=lambda r: _as_int(r[1].get("last_seen", 0), 0))
+		items  = []
+		for mac, e in rows:
+			tail = (e.get("local_name", "") or e.get("name", "")
+			        or e.get("vendor", "") or "")
+			if tail.strip().lower() == "unknown":
+				tail = ""
+			items.append((mac, f"{_ignore_row(mac, e.get('ip', ''), tail)}"
+			                   f"   {self._ab_age(e.get('last_seen', 0))}"
+			                   f"   devId={e.get('indigo_device_id') or 'none'}"))
+		return items
+
+	###----------------------------------------------------------###
+	def getMarkedForDeleteList(self, filter="", valuesDict=None, typeId="", targetId=0):
+		"""The orphans currently marked for removal — select one to put it back."""
+		marked = self._dialog_deletes(valuesDict)
+		if not marked:
+			return []
+		known = dict(self._known_orphans())
+		items = []
+		for mac in sorted(marked):
+			e = known.get(mac, {})
+			tail = (e.get("local_name", "") or e.get("name", "")
+			        or e.get("vendor", "") or "")
+			items.append((mac, f"{_ignore_row(mac, e.get('ip', ''), tail)}"
+			                   f"   {self._ab_age(e.get('last_seen', 0))}"
+			                   f"   devId={e.get('indigo_device_id') or 'none'}"))
+		return items
+
+	###----------------------------------------------------------###
+	def markKnownForDelete(self, valuesDict, *args):
+		"""Button: mark the selected orphan for removal from _known."""
+		sel = self._list_selection(valuesDict, "knownOrphanList")
+		if not sel:
+			return valuesDict
+		marked = self._dialog_deletes(valuesDict)
+		marked.add(sel.strip().lower())
+		valuesDict["pendingDeleteMacs"] = ",".join(sorted(marked))
+		return valuesDict
+
+	###----------------------------------------------------------###
+	def unmarkKnownForDelete(self, valuesDict, *args):
+		"""Button: put the selected entry back — nothing is deleted until OK."""
+		sel = self._list_selection(valuesDict, "markedForDeleteList")
+		if not sel:
+			return valuesDict
+		marked = self._dialog_deletes(valuesDict)
+		marked.discard(sel.strip().lower())
+		valuesDict["pendingDeleteMacs"] = ",".join(sorted(marked))
+		return valuesDict
+
+	###----------------------------------------------------------###
+	def markAllKnownOrphans(self, valuesDict, *args):
+		"""Button: mark every listed orphan at once."""
+		marked = self._dialog_deletes(valuesDict)
+		marked |= {m for m, _ in self._known_orphans()}
+		valuesDict["pendingDeleteMacs"] = ",".join(sorted(marked))
+		return valuesDict
+
+	###----------------------------------------------------------###
 	def _ignored_label_maps(self):
 		"""(mac → device name, ip → device name) for labelling the ignored lists."""
 		by_mac, by_ip = {}, {}
@@ -8228,7 +9140,7 @@ MENU ITEMS  (Plugins -> Network Scanner)
 		p_macs, _ = self._dialog_ignored(valuesDict)
 		by_mac, _ = self._ignored_label_maps()
 		return [(m, _ignore_row(mac=m, show_ip=False,
-		                        tail=(_strip_name_mac(by_mac[m], m) if m in by_mac
+		                        tail=(self._display_name(by_mac[m], m) if m in by_mac
 		                              else "— deleted —")))
 		        for m in sorted(p_macs)]
 
@@ -8240,7 +9152,7 @@ MENU ITEMS  (Plugins -> Network Scanner)
 		_, by_mac_of_ip = self._device_identity_maps()
 		prefix = self._ignore_dialog_prefix(valuesDict)
 		return [(p, _ignore_row(ip=p, ip_prefix=prefix, show_mac=False,
-		                        tail=(_strip_name_mac(by_ip[p], by_mac_of_ip.get(p, ""))
+		                        tail=(self._display_name(by_ip[p], by_mac_of_ip.get(p, ""))
 		                              if p in by_ip else "— deleted —")))
 		        for p in sorted(p_ips, key=_ip_for_notes)]
 
@@ -8403,6 +9315,22 @@ MENU ITEMS  (Plugins -> Network Scanner)
 		# _is_ignored() inside the enable pass sees the final state.
 		self._disable_ignored_devices(added_macs, added_ips, enable=False)
 		self._disable_ignored_devices(removed_macs, removed_ips, enable=True)
+
+		# Remove orphan entries from _known.  Done here, not when the button is
+		# clicked, so Cancel discards the marks like every other change.
+		to_delete = self._dialog_deletes(valuesDict)
+		if to_delete:
+			gone = []
+			with self._known_lock:
+				for mac in to_delete:
+					if mac in self._known:
+						del self._known[mac]
+						gone.append(mac)
+			if gone:
+				self._save_state()
+				self.indiLOG.log(20,
+					f"removed {len(gone)} stale entr{'y' if len(gone) == 1 else 'ies'} "
+					f"from known devices: {', '.join(sorted(gone))}")
 
 		for label, entries in (("added", added_macs | added_ips),
 		                       ("removed", removed_macs | removed_ips)):

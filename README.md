@@ -62,6 +62,15 @@ No third-party packages required.
    - Advertised service types → `mdnsServices` and → `deviceType` (derived via priority-ordered service map: `_airplay._tcp` = Smart Speaker / AV · `_ipp._tcp` = Printer · etc.)
    - Only devices that **actively advertise mDNS services** populate these states. Generic routers, many Android devices, and most Windows PCs do not.
 
+   **Active mDNS query** (*Experts only* → `on` / `off` / `auto`, default `auto`) sends one PTR query per ARP sweep — a single 50-byte multicast packet — asking every mDNS device to answer now. It gates only that prompt: passive capture of port 5353 and the 5-minute `dns-sd` browse run regardless, so no state is lost with it off. What degrades:
+
+   - **Promptness** — devices refresh on their own announcement clock instead of within the current sweep.
+   - **Devices invisible to `arp -a`** (behind proxy-ARP access points) are seen only via sniffed traffic, so their `last_seen` then rides entirely on spontaneous announcements. Sonos players are exactly this class.
+
+   `auto` is the default: it alternates 2 sweeps on, 2 off, indefinitely, and keeps per-mode totals — *Print mDNS auto totals* shows them, *Reset mDNS auto totals* clears them. Prefer it to a short A/B run, which cannot resolve a difference this small: four runs here each landed inside their own noise.
+
+   The report gives **coverage** (devices seen per sweep) next to sightings, and coverage is the one to trust. The sniffer allows one registration per MAC per 30 s and the mDNS branch shares that throttle, so a prompted reply can consume the slot an ARP sighting would have used — lowering the *sighting* count while no device goes unseen. It also lists which devices were seen only with the query on, only with it off, and never in either mode.
+
 > **Note on enrichment state population:** `dhcpHostname`, `dhcpOsFingerprint` are only captured on DHCP events (device reconnect / lease renewal). `mdnsModel`, `appleModel`, `osVersion`, `deviceType` require the device to advertise mDNS services. These states may remain empty for devices that are already connected with valid leases, or devices that simply do not support the relevant protocol.
 
 ---

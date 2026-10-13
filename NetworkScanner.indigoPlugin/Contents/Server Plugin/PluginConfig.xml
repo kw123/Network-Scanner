@@ -1,11 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- NOTE: no defaultValue= attributes in this file.  Indigo ignores them in
+     PluginConfig.xml, so they only look authoritative while doing nothing —
+     and they drifted out of step with the real defaults more than once.
+     Every default lives in kDefaultPluginPrefs in plugin.py, which __init__
+     applies to any key missing from saved prefs. -->
 <PluginConfig>
 
 	<Field id="pluginHeader" type="label" fontColor="orange">
 		<Label>Network Scanner  —  discovers LAN devices via passive traffic sniffing, ARP sweep, ping and TCP probe. Creates one Indigo device per MAC address; tracks online/offline state, IP, vendor and open ports.</Label>
 	</Field>
 
-	<Field id="sudoPassword" type="textfield" defaultValue="" secure="true">
+	<Field id="sudoPassword" type="textfield" secure="true">
 		<Label>MAC OS Password used for "sudo" command</Label>
 	</Field>
 
@@ -20,7 +25,7 @@
 	</Field>
 
 
-	<Field id="whichSymbol" type="menu" defaultValue="redGreen">
+	<Field id="whichSymbol" type="menu">
 		<Label>symbol</Label>
 		<List>
 			<Option value="redGreen">Red = offline; Green = online</Option>
@@ -32,7 +37,7 @@
 		<Label>In the indigo device listing which symbols should be used in the status column</Label>
 	</Field>
 
-	<Field id="whichOnOff" type="menu" defaultValue="upDown">
+	<Field id="whichOnOff" type="menu">
 		<Label>status text</Label>
 		<List>
 			<Option value="upDown">up / down</Option>
@@ -45,7 +50,7 @@
 	</Field>
 
 whichOnOff
-	<Field id="networkInterface" type="menu" defaultValue="_auto">
+	<Field id="networkInterface" type="menu">
 		<Label>Network Interface  (primary)</Label>
 		<List class="self" method="getActiveIfaceList" dynamicReload="true"/>
 	</Field>
@@ -56,7 +61,7 @@ Auto-detect picks the first Ethernet/LAN port, falling back to Wi-Fi.
 The chosen interface is logged at plugin startup.</Label>
 	</Field>
 
-	<Field id="networkInterface2" type="menu" defaultValue="_none">
+	<Field id="networkInterface2" type="menu">
 		<Label>Network Interface  (second, optional)</Label>
 		<List class="self" method="getActiveIfaceList2" dynamicReload="true"/>
 	</Field>
@@ -64,44 +69,6 @@ The chosen interface is logged at plugin startup.</Label>
 	<Field id="networkInterface2Label" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 		<Label>Optional second interface (e.g. Wi-Fi when Ethernet is primary).
 No extra threads or CPU when off</Label>
-	</Field>
-
-	<Field id="scanInterval" type="menu">
-		<Label>Scan Interval</Label>
-		<List>
-			<Option value="30">30 seconds</Option>
-			<Option value="60">60 seconds</Option>
-			<Option value="90">90 seconds</Option>
-			<Option value="120">120 seconds</Option>
-		</List>
-	</Field>
-
-	<Field id="scanIntervalLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
-		<Label>How often to run the reachability probe (ping + curl TCP fallback) on known devices. Can be tuned per device in device edit.</Label>
-	</Field>
-
-	<Field id="arpSweepEnabled" type="checkbox">
-		<Label>Enable ARP Sweep</Label>
-	</Field>
-
-	<Field id="arpSweepEnabledLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
-		<Label>Sweep the subnet with ARP requests to discover new devices.</Label>
-	</Field>
-
-	<Field id="sniffEnabled" type="checkbox">
-		<Label>Enable Passive Traffic Sniffing</Label>
-	</Field>
-
-	<Field id="sniffEnabledLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
-		<Label>Passively capture all ethernet traffic via tcpdump to detect any active device — not just ARP. Catches devices that suppress ARP responses. Each MAC is throttled to one update per 5 s. Requires sudo password below if tcpdump does not already have the BPF entitlement.</Label>
-	</Field>
-
-	<Field id="mdnsQueryEnabled" type="checkbox" defaultValue="false">
-		<Label>Enable Active mDNS Query</Label>
-	</Field>
-
-	<Field id="mdnsQueryEnabledLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
-		<Label>Send an mDNS PTR query at the start of each ARP sweep to prompt all mDNS-capable devices to announce themselves. Useful for discovering devices hidden behind proxy-ARP access points (e.g. HomePod, AirPort Express). Responses are captured automatically by the passive sniff thread — no extra processing needed.</Label>
 	</Field>
 
 	<Field id="offlineThreshold" type="menu">
@@ -134,16 +101,7 @@ No extra threads or CPU when off</Label>
 		<Label>Automatically create an Indigo device for each new MAC address found.</Label>
 	</Field>
 
-	<Field id="syntheticDevicesEnabled" type="checkbox" defaultValue="false">
-		<Label>Create Synthetic Devices for Ping-Only Hosts</Label>
-	</Field>
-
-	<Field id="syntheticDevicesEnabledLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
-		<Label>If an IP responds to ping but never appears in ARP (e.g. a device on a different VLAN), create an Indigo device for it using a synthetic MAC address (00:00:00:00:00:XX) and set it to ping-only mode.
-WARNING: some routers (proxy-ARP) answer ping on behalf of every IP on the subnet, which will flood this plugin with fake devices. Leave OFF unless you specifically need cross-VLAN monitoring.</Label>
-	</Field>
-
-	<Field id="flipAddressNotes" type="checkbox" defaultValue="false">
+	<Field id="flipAddressNotes" type="checkbox">
 		<Label>Flip Address / Notes Columns</Label>
 	</Field>
 
@@ -175,6 +133,78 @@ ON: Address = IP address, Notes = MAC address.</Label>
 	<Field id="prefixNameLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
 		<Label>prefix for device name seg
  "NET_34:7E:5C:FC:B0:8E"</Label>
+	</Field>
+
+	<Field id="expertSeparator" type="label">
+		<Label>── Experts only ─────────────────────</Label>
+	</Field>
+
+	<Field id="showexpertsection" type="checkbox">
+		<Label>Show experts section</Label>
+	</Field>
+
+	<Field id="expertcomment" type="label" fontSize="small" fontColor="darkgrey" visibleBindingId="showexpertsection" visibleBindingValue="true">
+		<Label>Defaults here are the measured best choice for a normal LAN. Change them only to work around a specific problem, and measure before and after.</Label>
+	</Field>
+
+	<Field id="arpSweepEnabled" type="checkbox" visibleBindingId="showexpertsection" visibleBindingValue="true">
+		<Label>Enable ARP Sweep</Label>
+	</Field>
+
+	<Field id="arpSweepEnabledLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey" visibleBindingId="showexpertsection" visibleBindingValue="true">
+		<Label>Sweep the subnet with ARP requests to discover new devices.</Label>
+	</Field>
+
+	<Field id="sniffEnabled" type="checkbox" visibleBindingId="showexpertsection" visibleBindingValue="true">
+		<Label>Enable Passive Traffic Sniffing</Label>
+	</Field>
+
+	<Field id="sniffEnabledLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey" visibleBindingId="showexpertsection" visibleBindingValue="true">
+		<Label>Passively capture all ethernet traffic via tcpdump to detect any active device — not just ARP. Catches devices that suppress ARP responses. Each MAC is throttled to one update per 5 s. Requires sudo password below if tcpdump does not already have the BPF entitlement.</Label>
+	</Field>
+
+	<Field id="activeMdnsEnabled" type="menu" visibleBindingId="showexpertsection" visibleBindingValue="true">
+		<Label>Enable Active mDNS Query</Label>
+		<List>
+			<Option value="on">on</Option>
+			<Option value="off">off</Option>
+			<Option value="auto">auto  (alternate 2 sweeps on / 2 off, and keep score)</Option>
+		</List>
+	</Field>
+
+	<Field id="activeMdnsEnabledLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey" visibleBindingId="showexpertsection" visibleBindingValue="true">
+		<Label>Sends one mDNS PTR query at the start of each ARP sweep — a single 50-byte multicast packet — prompting mDNS-capable devices to announce themselves. Finds devices hidden behind proxy-ARP access points (HomePod, Sonos, AirPort Express); responses are picked up by the passive sniff thread. "auto" by default: repeated A/B runs could not separate on from off — each landed inside its own noise — so auto settles it over days of normal use instead. The one report of trouble attributed to this query turned out to be the plugin timeout bug, fixed separately. Use "Test mDNS Query On/Off" in the plugin menu to measure both ways on your own network before changing this. "auto" alternates 2 sweeps on, 2 sweeps off, for ever, and accumulates the sighting totals for each - print them with "Print mDNS auto totals". Short A/B runs all landed inside their own noise here, so auto is the way to get an answer over days rather than minutes.</Label>
+	</Field>
+
+	<Field id="arpResolveNames" type="checkbox" visibleBindingId="showexpertsection" visibleBindingValue="true">
+		<Label>Resolve host names in arp</Label>
+	</Field>
+
+	<Field id="arpResolveNamesLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey" visibleBindingId="showexpertsection" visibleBindingValue="true">
+		<Label>OFF (the default) runs  arp -an  and reads the cache numerically. ON runs  arp -a , which does one reverse-DNS lookup per cache entry, so the run time scales with the size of the ARP cache rather than your network: on a host whose cache had filled with ~1500 proxy-ARP'd 169.254.x.x entries from a single device,  arp -a  took over two hours while  arp -an  took 0.04 s. That is what trips the arp timeout every cycle and logs a warning. The host name from arp is only a fallback — mDNS/Bonjour names take priority and are unaffected by this setting.</Label>
+	</Field>
+
+	<Field id="syntheticDevicesEnabled" type="checkbox" visibleBindingId="showexpertsection" visibleBindingValue="true">
+		<Label>Create Synthetic Devices for Ping-Only Hosts</Label>
+	</Field>
+
+	<Field id="syntheticDevicesEnabledLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey" visibleBindingId="showexpertsection" visibleBindingValue="true">
+		<Label>If an IP responds to ping but never appears in ARP (e.g. a device on a different VLAN), create an Indigo device for it using a synthetic MAC address (00:00:00:00:00:XX) and set it to ping-only mode.
+WARNING: some routers (proxy-ARP) answer ping on behalf of every IP on the subnet, which will flood this plugin with fake devices. Leave OFF unless you specifically need cross-VLAN monitoring.</Label>
+	</Field>
+
+	<Field id="scanInterval" type="menu" visibleBindingId="showexpertsection" visibleBindingValue="true">
+		<Label>Scan Interval</Label>
+		<List>
+			<Option value="30">30 seconds</Option>
+			<Option value="60">60 seconds</Option>
+			<Option value="90">90 seconds</Option>
+			<Option value="120">120 seconds</Option>
+		</List>
+	</Field>
+
+	<Field id="scanIntervalLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey" visibleBindingId="showexpertsection" visibleBindingValue="true">
+		<Label>How often to run the reachability probe (ping + curl TCP fallback) on known devices. Can be tuned per device in device edit.</Label>
 	</Field>
 
 	<Field id="debugSeparator" type="label">
@@ -266,14 +296,6 @@ ON: Address = IP address, Notes = MAC address.</Label>
 
 	<Field id="debugArpSweepEntriesLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey" visibleBindingId="showdebugsection" visibleBindingValue="true">
 		<Label>Log every entry parsed from  arp -a  during each sweep cycle, with replied/cache-only status. Use to diagnose proxy-ARP deduplication.</Label>
-	</Field>
-
-	<Field id="arpResolveNames" type="checkbox" defaultValue="false">
-		<Label>Resolve host names in arp</Label>
-	</Field>
-
-	<Field id="arpResolveNamesLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
-		<Label>OFF (recommended) runs  arp -an  and reads the cache numerically. ON runs  arp -a , which does one reverse-DNS lookup per cache entry — on a large or proxy-ARP-polluted ARP cache that can take minutes instead of milliseconds and will trip the arp timeout every cycle. The host name from arp is only a fallback: mDNS/Bonjour names take priority and are unaffected by this setting.</Label>
 	</Field>
 
 	<Field id="debugDelayedActions" type="checkbox" visibleBindingId="showdebugsection" visibleBindingValue="true">

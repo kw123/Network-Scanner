@@ -174,6 +174,39 @@ Result is written to the log and to variable networkScanner_pingDevice (on / off
 	</MenuItem>
 
 
+	<MenuItem id="mdnsABTest">
+		<Name>Test mDNS Query On/Off ...</Name>
+		<ConfigUI>
+			<Field id="abIntroLabel" type="label" fontSize="small" fontColor="darkgrey">
+				<Label>Runs one phase with the active mDNS query ON and one with it OFF, back to back, then prints the two side by side in the log. Measures sightings per phase from the seen-interval stats (nothing is reset). mdnsQueryEnabled is restored afterwards, even if the test fails.</Label>
+			</Field>
+
+			<Field id="abRounds" type="textfield" defaultValue="2">
+				<Label>Factor  (OFF+ON repeats)</Label>
+			</Field>
+
+			<Field id="phaseSweeps" type="textfield" defaultValue="1">
+				<Label>Sweeps per phase</Label>
+			</Field>
+
+			<Field id="phaseSweepsLabel" type="label" alignWithControl="true" fontSize="small" fontColor="darkgrey">
+				<Label>Runs (OFF + ON) x factor. A phase is counted in completed ARP sweeps, not minutes: sightings arrive in a burst per sweep, so a phase measured by the clock catches 2 or 3 bursts depending on where it starts — about 6% of the total, which was enough to make whichever phase ran first always win. One sweep per phase is one scan interval, so at 60 s the default factor of 2 takes about 5 minutes: one sweep to line up, then 4 measured. Raise the factor, not the sweeps, if the result looks too close to call.</Label>
+			</Field>
+
+		</ConfigUI>
+		<CallbackMethod>startMdnsABTest</CallbackMethod>
+	</MenuItem>
+
+	<MenuItem id="printMdnsAutoStats">
+		<Name>Print mDNS auto totals</Name>
+		<CallbackMethod>printMdnsAutoStats</CallbackMethod>
+	</MenuItem>
+
+	<MenuItem id="resetMdnsAutoStats">
+		<Name>Reset mDNS auto totals</Name>
+		<CallbackMethod>resetMdnsAutoStats</CallbackMethod>
+	</MenuItem>
+
 	<MenuItem id="manageIgnoredDevices">
 		<Name>(Un)Ignore Devices ...</Name>
 		<ConfigUI>
@@ -226,6 +259,40 @@ Result is written to the log and to variable networkScanner_pingDevice (on / off
 				<CallbackMethod>removeFromIgnoredIp</CallbackMethod>
 			</Field>
 
+			<Field id="orphanSeparatorLabel" type="label" fontSize="small" fontColor="darkgrey">
+				<Label>── Stale entries ───────────────────────────
+Known MAC addresses with no Indigo device: either the device was deleted, or one was never created. They cannot be reached from the Active list above, and they keep appearing in the mDNS test's unseen lists. Opening this dialog first tries to repair the link by looking each MAC up among this plugin's devices — anything found that way is relinked and does NOT appear here, so the list only offers entries with no device at all. Marking one removes it from known_devices.json when you confirm; if the device is still on the network it will simply be rediscovered.</Label>
+			</Field>
+
+			<Field id="knownOrphanList" type="list" rows="8">
+				<Label>Known, no Indigo device  (oldest first)</Label>
+				<List class="self" filter="orphans" method="getKnownOrphanList" dynamicReload="true"/>
+			</Field>
+
+			<Field id="markKnownButton" type="button">
+				<Label> </Label>
+				<Title>▼  Mark Selected for Removal</Title>
+				<CallbackMethod>markKnownForDelete</CallbackMethod>
+			</Field>
+
+			<Field id="markAllKnownButton" type="button">
+				<Label> </Label>
+				<Title>▼▼  Mark ALL Listed</Title>
+				<CallbackMethod>markAllKnownOrphans</CallbackMethod>
+			</Field>
+
+			<Field id="markedForDeleteList" type="list" rows="6">
+				<Label>Marked for removal  (click to put back)</Label>
+				<List class="self" filter="marked" method="getMarkedForDeleteList" dynamicReload="true"/>
+			</Field>
+
+			<Field id="unmarkKnownButton" type="button">
+				<Label> </Label>
+				<Title>▲  Keep Selected Entry</Title>
+				<CallbackMethod>unmarkKnownForDelete</CallbackMethod>
+			</Field>
+
+			<Field id="pendingDeleteMacs" type="textfield" hidden="true"/>
 			<Field id="pendingSeeded" type="textfield" hidden="true"/>
 			<Field id="pendingIgnoredMacs" type="textfield" hidden="true"/>
 			<Field id="pendingIgnoredIps"  type="textfield" hidden="true"/>
@@ -253,6 +320,12 @@ Result is written to the log and to variable networkScanner_pingDevice (on / off
 				<Label>Devices grouped by OS / ports / type</Label>
 				<Title>PRINT</Title>
 				<CallbackMethod>listDevicesByState</CallbackMethod>
+			</Field>
+
+			<Field id="btnUnseen" type="button">
+				<Label>Unseen / stale devices (never sighted, offline)</Label>
+				<Title>PRINT</Title>
+				<CallbackMethod>printUnseenDevices</CallbackMethod>
 			</Field>
 
 			<Field id="btnIpChanged" type="button">

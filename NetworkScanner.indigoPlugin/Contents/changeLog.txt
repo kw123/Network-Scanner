@@ -1,14 +1,61 @@
  Network Scanner – Indigo Plugin
 Change Log
 ================================================================================
-SUMMARY — 2026.6.0 @ 2026-10-13   NOT PUBLISHED YET
+SUMMARY — 2026.7.0 @ 2026-10-13
 
-FIXES:      Home/Away froze with exactly one member home; ONLINE group
-            KeyError on every recalc; arp timeout warning + retry wrong at
-            the cap; PluginConfig.xml was malformed XML.
-TECHNICAL:  hardened numeric state reads; delayed-action queue ported from
-            piBeacon;  arp -an  now the default.
-NEW:        7 Home/Away states; "(Un)Ignore Devices" menu, by IP and MAC.
+FIXES:      known entries that lost their indigo_device_id are relinked
+TECHNICAL:  mDNS A/B test measured in sweeps, with a noise-aware verdict
+            experts-only section in the plugin config
+NEW:        active mDNS query on / off / auto, default auto, keeps score
+            "Stale entries" in (Un)Ignore Devices
+            "Unseen / stale devices" under Print tools
+
+================================================================================
+Version 2026.7.0 (2026-10-13)
+
+1. FIX: known entries can lose their indigo_device_id while the Indigo
+     device still exists (51 of 135 here, in one batch).  Without it the
+     entry is unreachable from the (Un)Ignore dialog and counts as unseen
+     in the mDNS test.  A one-time step 30 s after startup relinks them by
+     MAC; the dialog repairs them too, whenever it opens.
+
+2. NEW "Stale entries" section in (Un)Ignore Devices: known MACs with no
+     Indigo device at all, oldest first, with last-seen age and devId.
+     Mark them (or all) for removal from known_devices.json; Cancel keeps
+     everything.
+
+3. mDNS A/B test reworked: phases are whole ARP sweeps, not minutes, and
+     run (OFF+ON) x factor.  A wall-clock phase caught 2 or 3 sighting
+     bursts depending on where it started, which made whichever phase ran
+     first always win by about 6%.  The report now also prints the
+     per-phase spread and a verdict that refuses to call a difference
+     smaller than that spread a result.
+
+4. mDNS report: unseen devices are split into "online, tracked by
+     ping/probe" and "offline", with last-seen age, listed in full.
+     seen_stats is only bumped by the sweep and the sniffer, so a pingOnly
+     device can be up and never count as seen - that is now stated and
+     those devices are tagged.
+
+5. Plugin config: arp sweep, passive sniffing, active mDNS query, arp name
+     resolution, synthetic devices and scan interval moved into a
+     collapsed "Experts only" section.
+
+6. "Enable Active mDNS Query" is now on / off / auto, renamed internally
+     from mdnsQueryEnabled so existing installs take the new default.
+     DEFAULT IS "auto": it alternates 2 sweeps with the query and 2
+     without, for ever, and keeps per-mode totals - repeated A/B runs
+     could not separate on from off, each landing inside its own noise.
+     "Print mDNS auto totals" / "Reset mDNS auto totals" in the plugin
+     menu.  Coverage (devices seen per sweep) is reported next to
+     sightings and is the metric to trust: the sniffer allows one
+     registration per MAC per 30 s and the mDNS branch shares that
+     throttle, so a prompted reply can take the slot an ARP sighting
+     would have used and lower the sighting count with nothing unseen.
+
+7. NEW "Unseen / stale devices" button under Print tools: never-sighted
+     and offline devices as ip / mac / last seen / mDNS name / Indigo
+     name, oldest first, without running an A/B test.
 
 ================================================================================
 Version 2026.6.0 (2026-10-13)
