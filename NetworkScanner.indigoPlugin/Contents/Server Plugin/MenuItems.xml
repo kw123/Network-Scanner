@@ -174,11 +174,23 @@ Result is written to the log and to variable networkScanner_pingDevice (on / off
 	</MenuItem>
 
 
-	<MenuItem id="manageIgnoredMacs">
-		<Name>Manage Ignored MAC Addresses ...</Name>
+	<MenuItem id="manageIgnoredDevices">
+		<Name>(Un)Ignore Devices ...</Name>
 		<ConfigUI>
-			<Field id="availableDevicesList" type="list" rows="8">
-				<Label>Discovered Devices  (click to select)</Label>
+			<Field id="ignoreIntroLabel" type="label" fontSize="small" fontColor="darkgrey">
+				<Label>Ignoring a device adds BOTH its MAC and its IP to the ignore list, sets its Indigo device to not enabled, and stops the scanner creating or modifying it. Un-ignoring removes the one entry you select and enables the device again.</Label>
+			</Field>
+
+			<Field id="rowFormatLabel" type="label" fontSize="small" fontColor="darkgrey">
+				<Label>Active rows are  IP · MAC · vendor, sorted by IP. The IP column drops the prefix all your addresses share, zero-padded so it sorts; an address outside that prefix — multicast 224.0.0.251, broadcast 255.255.255.255 — is shown in full. Only the vendor/name on the right is shortened if the row does not fit.</Label>
+			</Field>
+
+			<Field id="ipPrefixShown" type="textfield" readonly="yes">
+				<Label>IP prefix left out:</Label>
+			</Field>
+
+			<Field id="availableDevicesList" type="list" rows="10">
+				<Label>Active Devices  (sorted by IP, click to select)</Label>
 				<List class="self" filter="available" method="getNetworkDeviceList" dynamicReload="true"/>
 			</Field>
 
@@ -188,18 +200,38 @@ Result is written to the log and to variable networkScanner_pingDevice (on / off
 				<CallbackMethod>addToIgnored</CallbackMethod>
 			</Field>
 
-			<Field id="ignoredDevicesList" type="list" rows="5">
-				<Label>Ignored Devices  (click to select)</Label>
-				<List class="self" filter="ignored" method="getIgnoredDeviceList" dynamicReload="true"/>
+			<Field id="ignoredSplitLabel" type="label" fontSize="small" fontColor="darkgrey">
+				<Label>If the Indigo device still exists, un-ignoring either its MAC or its IP releases both — while the device is there the two entries describe one thing. Once the device has been deleted they are independent: un-ignoring one leaves the other ignored, because the same MAC can return on a different IP (new DHCP lease) and the same IP can return on a different MAC (iOS private / randomised MAC).</Label>
 			</Field>
 
-			<Field id="removeFromIgnoredButton" type="button">
-				<Label> </Label>
-				<Title>▲  Un-ignore Selected Device</Title>
-				<CallbackMethod>removeFromIgnored</CallbackMethod>
+			<Field id="ignoredMacList" type="list" rows="6">
+				<Label>Ignored MAC Addresses  (click to select)</Label>
+				<List class="self" filter="ignoredMac" method="getIgnoredMacList" dynamicReload="true"/>
 			</Field>
+
+			<Field id="removeFromIgnoredMacButton" type="button">
+				<Label> </Label>
+				<Title>▲  Un-ignore Selected MAC</Title>
+				<CallbackMethod>removeFromIgnoredMac</CallbackMethod>
+			</Field>
+
+			<Field id="ignoredIpList" type="list" rows="6">
+				<Label>Ignored IP Addresses  (click to select)</Label>
+				<List class="self" filter="ignoredIp" method="getIgnoredIpList" dynamicReload="true"/>
+			</Field>
+
+			<Field id="removeFromIgnoredIpButton" type="button">
+				<Label> </Label>
+				<Title>▲  Un-ignore Selected IP</Title>
+				<CallbackMethod>removeFromIgnoredIp</CallbackMethod>
+			</Field>
+
+			<Field id="pendingSeeded" type="textfield" hidden="true"/>
+			<Field id="pendingIgnoredMacs" type="textfield" hidden="true"/>
+			<Field id="pendingIgnoredIps"  type="textfield" hidden="true"/>
 
 		</ConfigUI>
+		<CallbackMethod>manageIgnoredDevices</CallbackMethod>
 	</MenuItem>
 
 

@@ -253,6 +253,71 @@ def _ip_for_notes(ip: str) -> str:
 	except Exception:
 		return ip
 
+def _ip_common_prefix(ips) -> str:
+	"""Most common "a.b." first-two-octet prefix across ips, or "" if none dominates.
+
+	On a normal LAN every address shares one prefix (192.168., 10.0., ...), so
+	repeating it on every row wastes characters in a narrow Indigo list field.
+	Multicast / broadcast pseudo-hosts (224.0.0.251, 255.255.255.255) are the
+	exception and keep their full address - being the minority, they never win
+	the count.  Needs at least two addresses sharing a prefix before stripping
+	anything, so a single-device list is never made ambiguous.
+	"""
+	counts = {}
+	for ip in ips:
+		parts = (ip or "").split(".")
+		if len(parts) == 4:
+			key = f"{parts[0]}.{parts[1]}."
+			counts[key] = counts.get(key, 0) + 1
+	if not counts:
+		return ""
+	best, n = max(counts.items(), key=lambda kv: kv[1])
+	return best if n > 1 else ""
+
+
+def _ignore_row(mac: str = "", ip: str = "", tail: str = "", ip_prefix: str = "",
+                show_mac: bool = True, show_ip: bool = True) -> str:
+	"""One row for the (Un)Ignore Devices lists:  short IP, MAC, then free text.
+
+	    1.042   aa:bb:cc:dd:ee:ff Apple, Inc.
+	    |<-7->| |<-- 17 chars -->| |<- full text, never shortened ->|
+
+	IP first because the list is sorted by IP, so the eye scans the column it is
+	ordered by.  It is safe to put first now that the shared prefix is stripped
+	(7 chars, not 15) and nothing is truncated — the earlier IP-first layout ate
+	18 characters before the MAC even started and clipped it.
+
+	show_mac / show_ip switch a whole COLUMN off.  The ignored-MAC and ignored-IP
+	lists hold one kind of entry each, so padding the other column would only
+	indent every row with blanks; the active list keeps both because its rows
+	genuinely vary and the padding is what aligns them.
+
+	ip_prefix (from _ip_common_prefix) is the shared "a.b." stripped from the IP
+	column and named once in the dialog's prefix field instead.  An address that
+	does not start with it — a multicast or broadcast pseudo-host — is shown in
+	full and simply pushes the rest of that one row right.
+
+	The tail is never truncated: an Indigo list scrolls horizontally, so the user
+	can drag to read the rest, which an ellipsis would have thrown away.
+	"""
+	cols = []
+	if show_ip:
+		_short = ""
+		if ip:
+			_short = _ip_for_notes(ip)
+			if ip_prefix and _short.startswith(ip_prefix):
+				_short = _short[len(ip_prefix):]
+		# pad only when a MAC column follows, otherwise it is just trailing space
+		cols.append(_short.ljust(7) if show_mac else _short)
+	if show_mac:
+		_m = (mac or "").lower()
+		cols.append(_m.ljust(17) if show_ip else _m)
+	_tail = (tail or "").strip()
+	if _tail:
+		cols.append(_tail)
+	return " ".join(cols).rstrip()
+
+
 def _now_str():
 	return datetime.datetime.now().strftime(STDDTSTRING)
 
@@ -322,6 +387,32 @@ def _mac_to_device_name(mac: str, vendor: str = "", local_name: str = "", prefix
 			return f"{base}  {safe}"
 	return base
 
+
+
+def _strip_name_mac(name: str, mac: str = "") -> str:
+	"""Drop the auto-generated "<prefix><MAC>" head from a device name.
+
+	_mac_to_device_name() builds names as  Net_AA:BB:CC:DD:EE:FF  iPhone , so a
+	list row that already shows the MAC in its own column would print it twice,
+	separated by that helper's double space:
+
+	    01:00:5e:00:00:fb Net_01:00:5E:00:00:FB  mdnsmcastnet
+
+	Cutting everything up to and including the MAC leaves just the human part,
+	with inner runs of whitespace collapsed:
+
+	    01:00:5e:00:00:fb mdnsmcastnet
+
+	Returns "" when the name carried no human part at all (name was only the
+	prefix + MAC), and the name unchanged when it does not contain the MAC.
+	"""
+	if not name:
+		return ""
+	if mac:
+		idx = name.upper().find(mac.upper())
+		if idx >= 0:
+			name = name[idx + len(mac):]
+	return " ".join(name.split())
 
 
 def _icmp_checksum(data: bytes) -> int:
@@ -668,6 +759,11 @@ class Plugin(indigo.PluginBase):
 		if not os.path.exists(self.indigoPreferencesPluginDir):
 			os.mkdir(self.indigoPreferencesPluginDir)
 		self.stateFile     = self.indigoPreferencesPluginDir+"known_devices.json"
+		# Ignore lists live in their OWN file, not in known_devices.json: that one
+		# is rewritten wholesale on every save, and the ignore lists must not share
+		# that blast radius or be lost if the device cache is deleted to force a
+		# rescan.
+		self.ignoredFile   = self.indigoPreferencesPluginDir+"ignored.json"
 		# README.md sits one level up from "Server Plugin/" inside the bundle.
 		# os.getcwd() is set to "Server Plugin/" by Indigo before __init__ runs.
 		self._readme_path  = os.path.realpath(os.path.join(os.getcwd(), "..", "README.md"))
@@ -811,8 +907,12 @@ class Plugin(indigo.PluginBase):
 		self._exe_tcpdump = "/usr/sbin/tcpdump"
 		self._exe_dns_sd  = "/usr/bin/dns-sd"
 
-		# Set of lowercase MACs to never create Indigo devices for
-		self._ignored_macs: set = self._load_ignored_macs()
+		# MACs / IPs to never create or modify Indigo devices for.
+		# _load_ignored() may populate these itself while migrating, so seed them
+		# first — it writes the file through self._ignored_* .
+		self._ignored_macs: set = set()
+		self._ignored_ips:  set = set()
+		self._ignored_macs, self._ignored_ips = self._load_ignored()
 
 		# MAC → Vendor lookup (async download on first run)
 		self.M2V               = None
@@ -950,7 +1050,7 @@ class Plugin(indigo.PluginBase):
 			for mac, entry in snapshot.items():
 				if self._stop_event.is_set():
 					break
-				if mac.lower() in self._ignored_macs:
+				if self._is_ignored(mac, entry.get("ip", "")):
 					continue
 				if not entry.get("online", False):
 					continue   # already offline — nothing to do
@@ -4569,7 +4669,8 @@ class Plugin(indigo.PluginBase):
 		# Using threads (not asyncio) because socket.connect() is blocking.
 		probe_items = [
 			(mac, entry) for mac, entry in snapshot.items()
-			if not self._stop_event.is_set() and mac.lower() not in self._ignored_macs
+			if not self._stop_event.is_set()
+			   and not self._is_ignored(mac, entry.get("ip", ""))
 		]
 		# Adaptive deadline shared with the ARP sweep (pluginPrefs "probeDeadline").
 		# A timeout keeps the partial results instead of aborting the probe cycle.
@@ -5384,7 +5485,7 @@ class Plugin(indigo.PluginBase):
 		offline-timeout logic will correct the state if it never responds to ping.
 		local_name is the mDNS/Bonjour hostname from the arp -a output (empty if unknown).
 		"""
-		if mac.lower() in self._ignored_macs:
+		if self._is_ignored(mac, ip):
 			return
 		now = time.time()
 		with self._known_lock:
@@ -5442,9 +5543,9 @@ class Plugin(indigo.PluginBase):
 		# link-local 169.254.x.x addresses are not meaningful for LAN tracking.
 		if not ip or ip == "0.0.0.0" or ip.startswith("169.254."):
 			return
-		if mac.lower() in self._ignored_macs:
+		if self._is_ignored(mac, ip):
 			if self.decideMyLog("Ignored"):
-				self.indiLOG.log(10, f"Ignored MAC skipped: {mac}")
+				self.indiLOG.log(10, f"Ignored device skipped: mac={mac} ip={ip}")
 			return
 
 		now = time.time()
@@ -5621,6 +5722,14 @@ class Plugin(indigo.PluginBase):
 		stale ARP-cache entries that were NOT ping-confirmed — prevents ghost ON transitions).
 		source: what set the device online ("sweep (arp)", "traffic observed (tcpdump)", "ping(ICMP)", "tcp:port"); stored in setOnBy state.
 		"""
+		# Never create or modify a device for an ignored MAC / IP.  The callers
+		# already gate on this, but this is the only function that creates and
+		# writes devices, so the check belongs here too — it is reached from the
+		# sweep, the sniff thread and the menu actions.
+		if self._is_ignored(mac, ip):
+			if self.decideMyLog("Ignored"):
+				self.indiLOG.log(10, f"Ignored device not created/modified: mac={mac} ip={ip}")
+			return
 		dev_name = _mac_to_device_name(mac, vendor, local_name=local_name, prefixName = self._getPrefixName())
 
 		# Fast path: look up cached device ID stored in _known.
@@ -6212,15 +6321,117 @@ class Plugin(indigo.PluginBase):
 			return "Unknown"
 
 	###----------------------------------------------------------###
-	def _load_ignored_macs(self) -> set:
-		"""Load ignored MACs from pluginPrefs as a set of lowercase strings."""
-		raw = self.pluginPrefs.get("ignoredMacs", "")
-		return {m.strip().lower() for m in raw.split(",") if m.strip()}
+	def _load_ignored(self):
+		"""Load (ignored_macs, ignored_ips) from ignored.json.
+
+		Shape of the file (indent=2, so it can be read and hand-edited):
+
+		    {
+		      "macs": ["01:00:5e:00:00:fb", "aa:bb:cc:dd:ee:ff"],
+		      "ips":  ["192.168.1.42", "224.0.0.251"]
+		    }
+
+		One-time migration: earlier versions kept these in pluginPrefs as the
+		comma-separated keys "ignoredMacs" / "ignoredIps".  When the file does not
+		exist yet, those keys are read, written to the file, and then CLEARED — if
+		they were left in place, deleting ignored.json would silently resurrect a
+		stale list on the next start.
+		"""
+		macs, ips = set(), set()
+		if os.path.exists(self.ignoredFile):
+			try:
+				with open(self.ignoredFile, "r") as fh:
+					data = json.load(fh)
+				macs = {str(m).strip().lower() for m in data.get("macs", []) if str(m).strip()}
+				ips  = {str(p).strip()         for p in data.get("ips",  []) if str(p).strip()}
+				return macs, ips
+			except Exception as e:
+				self.indiLOG.log(30,
+					f"Could not read {self.ignoredFile}: {e} — starting with empty "
+					f"ignore lists; the file is left untouched for inspection")
+				return set(), set()
+
+		# No file yet — migrate from the old pluginPrefs keys, if any
+		raw_m = self.pluginPrefs.get("ignoredMacs", "") or ""
+		raw_i = self.pluginPrefs.get("ignoredIps",  "") or ""
+		macs = {m.strip().lower() for m in raw_m.split(",") if m.strip()}
+		ips  = {p.strip()         for p in raw_i.split(",") if p.strip()}
+		self._ignored_macs, self._ignored_ips = macs, ips
+		if self._save_ignored() and (macs or ips):
+			self.pluginPrefs["ignoredMacs"] = ""
+			self.pluginPrefs["ignoredIps"]  = ""
+			self.indiLOG.log(20,
+				f"migrated ignore lists from pluginPrefs to {self.ignoredFile}: "
+				f"{len(macs)} MAC(s), {len(ips)} IP(s)")
+		return macs, ips
 
 	###----------------------------------------------------------###
-	def _save_ignored_macs(self):
-		"""Persist ignored MACs back to pluginPrefs as a comma-separated string."""
-		self.pluginPrefs["ignoredMacs"] = ", ".join(sorted(self._ignored_macs))
+	def _save_ignored(self) -> bool:
+		"""Write both ignore lists to ignored.json, formatted.  True on success."""
+		try:
+			with open(self.ignoredFile, "w") as fh:
+				json.dump({"macs": sorted(self._ignored_macs),
+				           "ips":  sorted(self._ignored_ips)}, fh, indent=2)
+			return True
+		except Exception as e:
+			self.indiLOG.log(30, f"Could not write {self.ignoredFile}: {e}")
+			return False
+
+	###----------------------------------------------------------###
+	def _is_ignored(self, mac: str = "", ip: str = "") -> bool:
+		"""True when this sighting is ignored by either of its identities.
+
+		A device is ignored if its MAC is on the ignored-MAC list OR its IP is on
+		the ignored-IP list.  Two lists rather than one because the two identities
+		behave differently: a MAC follows the device across DHCP leases, while an
+		IP is the only handle on things that have no meaningful MAC of their own
+		(multicast / broadcast pseudo-hosts) or whose MAC is not known yet.
+		"""
+		if mac and mac.lower() in self._ignored_macs:
+			return True
+		if ip and ip in self._ignored_ips:
+			return True
+		return False
+
+	###----------------------------------------------------------###
+	def _disable_ignored_devices(self, macs: set, ips: set, enable: bool = False):
+		"""Enable or disable every Indigo device matching the given MACs / IPs.
+
+		Called when the ignore list is committed: an ignored device is set to NOT
+		enabled so Indigo stops showing it as live, and the scanner additionally
+		never creates or modifies it (see _is_ignored call sites).  Un-ignoring
+		re-enables it, otherwise the device would sit disabled for ever with no
+		visible reason.
+		"""
+		if not macs and not ips:
+			return
+		changed = []
+		for dev in indigo.devices.iter(PLUGIN_ID):
+			if dev.deviceTypeId != NETWORK_DEVICE_TYPE_ID:
+				continue
+			_mac = (dev.states.get("MACNumber", "") or "").lower()
+			_ip  = dev.states.get("ipNumber", "") or ""
+			if not ((_mac and _mac in macs) or (_ip and _ip in ips)):
+				continue
+			# On re-enable, skip devices still covered by a remaining ignore entry
+			if enable and self._is_ignored(_mac, _ip):
+				continue
+			if dev.enabled == enable:
+				continue
+			try:
+				# Indigo C++ binding: positional args only — (elem, value)
+				indigo.device.enable(dev.id, enable)
+				with self._dev_cache_lock:
+					if dev.id in self._dev_cache:
+						self._dev_cache[dev.id]["enabled"] = enable
+				changed.append(dev.name)
+			except Exception as e:
+				if not _benign_ipc_error(e):
+					self.indiLOG.log(30, f"could not {'enable' if enable else 'disable'} {dev.name}: {e}")
+		if changed:
+			self.indiLOG.log(20,
+				f"{'Enabled' if enable else 'Disabled'} {len(changed)} device(s): "
+				+ ", ".join(sorted(changed)))
 
 	###----------------------------------------------------------###
 	def _load_state(self):
@@ -7927,46 +8138,171 @@ MENU ITEMS  (Plugins -> Network Scanner)
 
 	###----------------------------------------------------------###
 	def getNetworkDeviceList(self, filter="", valuesDict=None, typeId="", targetId=0):
-		"""List of discovered devices NOT yet ignored — shown in top panel."""
-		pending = self._dialog_ignored(valuesDict)
-		items   = []
+		"""Top panel: discovered devices that are NOT ignored.
+
+		The row value is "<mac>|<ip>" so the Ignore button can add both of the
+		device's identities in one click without a second lookup.
+		"""
+		p_macs, p_ips = self._dialog_ignored(valuesDict)
+		rows = []
 		for dev in indigo.devices.iter(PLUGIN_ID):
-			mac    = dev.states.get("MACNumber", "").lower()
-			ip     = dev.states.get("ipNumber",  "")
+			if dev.deviceTypeId != NETWORK_DEVICE_TYPE_ID:
+				continue
+			mac    = (dev.states.get("MACNumber", "") or "").lower()
+			ip     = dev.states.get("ipNumber",  "") or ""
 			vendor = dev.states.get("hardwareVendor", "Unknown")
-			if not mac or mac in pending: continue
-			items.append((mac, f"{_ip_for_notes(ip)}   {mac}   {vendor}"))
-		items.sort(key=lambda x: x[1])
-		return items
+			if not mac and not ip:
+				continue
+			if (mac and mac in p_macs) or (ip and ip in p_ips):
+				continue
+			rows.append((mac, ip, vendor))
+		# Sort by IP (padded, so .5 < .54) and fall back to MAC for IP-less rows,
+		# even though the MAC is shown first — scanning a LAN list by address is
+		# more useful than by vendor-assigned MAC.
+		prefix = self._ignore_dialog_prefix(valuesDict)
+		rows.sort(key=lambda r: (_ip_for_notes(r[1]) if r[1] else "zzz", r[0]))
+		return [(f"{m}|{i}", _ignore_row(m, i, v, prefix)) for m, i, v in rows]
 
 	###----------------------------------------------------------###
-	def getIgnoredDeviceList(self, filter="", valuesDict=None, typeId="", targetId=0):
-		"""List of currently ignored devices — shown in bottom panel."""
-		pending = self._dialog_ignored(valuesDict)
-		items   = []
+	def _ignore_dialog_prefix(self, valuesDict=None) -> str:
+		"""The one IP prefix the (Un)Ignore dialog strips, shared by every field.
+
+		Computed from ALL addresses the dialog can show — every network device's
+		IP plus every pending ignored IP — so the two lists and the text field
+		that names the prefix can never disagree.  Each list computing its own
+		from its own rows was wrong: an ignored-IP list holding only 224.0.0.251
+		would strip a different prefix than the active list above it.
+		"""
+		ips = []
 		for dev in indigo.devices.iter(PLUGIN_ID):
-			mac    = dev.states.get("MACNumber", "").lower()
-			ip     = dev.states.get("ipNumber",  "")
-			vendor = dev.states.get("hardwareVendor", "Unknown")
-			if not mac or mac not in pending: continue
-			items.append((mac, f"{_ip_for_notes(ip)}   {mac}   {vendor}"))
-		# Also include ignored MACs that have no Indigo device (deleted manually)
-		for mac in sorted(pending):
-			if not any(mac == item[0] for item in items):
-				items.append((mac, f"(no device)   {mac}"))
-		items.sort(key=lambda x: x[1])
-		return items
+			if dev.deviceTypeId != NETWORK_DEVICE_TYPE_ID:
+				continue
+			_i = dev.states.get("ipNumber", "") or ""
+			if _i:
+				ips.append(_i)
+		_, p_ips = self._dialog_ignored(valuesDict)
+		ips.extend(p_ips)
+		return _ip_common_prefix(ips)
+
+	###----------------------------------------------------------###
+	def _device_identity_maps(self):
+		"""(mac → ip, ip → mac) over existing network devices.
+
+		This is the MAC/IP binding that only exists while the Indigo device does.
+		Deleting the device breaks it, which is why un-ignoring behaves
+		differently for a device that is still there (see removeFromIgnoredMac).
+		"""
+		mac2ip, ip2mac = {}, {}
+		for dev in indigo.devices.iter(PLUGIN_ID):
+			if dev.deviceTypeId != NETWORK_DEVICE_TYPE_ID:
+				continue
+			_i = dev.states.get("ipNumber", "") or ""
+			_m = (dev.states.get("MACNumber", "") or "").lower()
+			if _i and _m:
+				mac2ip[_m] = _i
+				ip2mac[_i] = _m
+		return mac2ip, ip2mac
+
+	###----------------------------------------------------------###
+	def _ignored_label_maps(self):
+		"""(mac → device name, ip → device name) for labelling the ignored lists."""
+		by_mac, by_ip = {}, {}
+		for dev in indigo.devices.iter(PLUGIN_ID):
+			if dev.deviceTypeId != NETWORK_DEVICE_TYPE_ID:
+				continue
+			_m = (dev.states.get("MACNumber", "") or "").lower()
+			_i = dev.states.get("ipNumber", "") or ""
+			if _m: by_mac[_m] = dev.name
+			if _i: by_ip[_i]  = dev.name
+		return by_mac, by_ip
+
+	###----------------------------------------------------------###
+	def getIgnoredMacList(self, filter="", valuesDict=None, typeId="", targetId=0):
+		"""Ignored MACs — its own list, independent of the ignored-IP list.
+
+		Once an ignored device has been deleted the two identities are no longer
+		linked: the same MAC can come back on a different IP (new DHCP lease),
+		and the same IP can come back on a different MAC (iOS private / randomised
+		MAC addresses).  So each is un-ignored separately.
+		"""
+		p_macs, _ = self._dialog_ignored(valuesDict)
+		by_mac, _ = self._ignored_label_maps()
+		return [(m, _ignore_row(mac=m, show_ip=False,
+		                        tail=(_strip_name_mac(by_mac[m], m) if m in by_mac
+		                              else "— deleted —")))
+		        for m in sorted(p_macs)]
+
+	###----------------------------------------------------------###
+	def getIgnoredIpList(self, filter="", valuesDict=None, typeId="", targetId=0):
+		"""Ignored IPs — its own list.  See getIgnoredMacList for why."""
+		_, p_ips = self._dialog_ignored(valuesDict)
+		_, by_ip = self._ignored_label_maps()
+		_, by_mac_of_ip = self._device_identity_maps()
+		prefix = self._ignore_dialog_prefix(valuesDict)
+		return [(p, _ignore_row(ip=p, ip_prefix=prefix, show_mac=False,
+		                        tail=(_strip_name_mac(by_ip[p], by_mac_of_ip.get(p, ""))
+		                              if p in by_ip else "— deleted —")))
+		        for p in sorted(p_ips, key=_ip_for_notes)]
 
 	###----------------------------------------------------------###
 	def _dialog_ignored(self, valuesDict):
-		"""Return the working ignored-set for the current dialog session."""
-		if valuesDict is None:
-			return set(self._ignored_macs)
-		raw = valuesDict.get("pendingIgnoredMacs", None)
-		if raw is None:
-			return set(self._ignored_macs)   # first open — seed from real set
-		return {m.strip() for m in raw.split(",") if m.strip()}
+		"""Return (pending_macs, pending_ips) for the current dialog session.
 
+		Returns the live sets on first open, then the dialog's own working copy,
+		so nothing is committed until OK.
+		"""
+		# "has the dialog been seeded yet" MUST be its own flag.  Testing the
+		# pending fields for None does not work: they are declared in
+		# MenuItems.xml, so Indigo hands them over as EMPTY STRINGS when the
+		# dialog opens, and "".split(",") filters to an empty set — which read as
+		# "the user cleared every entry" and committed that on OK, wiping the
+		# whole ignore list.  An empty string is now a legitimate empty list, and
+		# only pendingSeeded decides whether to seed from the live sets.
+		if valuesDict is None or valuesDict.get("pendingSeeded", "") != "1":
+			return set(self._ignored_macs), set(self._ignored_ips)
+		raw_m = valuesDict.get("pendingIgnoredMacs", "") or ""
+		raw_i = valuesDict.get("pendingIgnoredIps",  "") or ""
+		macs = {m.strip().lower() for m in raw_m.split(",") if m.strip()}
+		ips  = {p.strip() for p in raw_i.split(",") if p.strip()}
+		return macs, ips
+
+	###----------------------------------------------------------###
+	def _stash_pending(self, valuesDict, macs: set, ips: set):
+		"""Write the dialog's working sets back into valuesDict.
+
+		Also refreshes the read-only prefix field: ignoring or un-ignoring an
+		address can change which prefix dominates, and the field must not keep
+		claiming the old one.
+		"""
+		valuesDict["pendingIgnoredMacs"] = ",".join(sorted(macs))
+		valuesDict["pendingIgnoredIps"]  = ",".join(sorted(ips))
+		valuesDict["pendingSeeded"]      = "1"
+		valuesDict["ipPrefixShown"]      = self._ignore_prefix_text(valuesDict)
+		return valuesDict
+
+	###----------------------------------------------------------###
+	def _ignore_prefix_text(self, valuesDict=None) -> str:
+		"""Text for the read-only prefix field."""
+		p = self._ignore_dialog_prefix(valuesDict)
+		return f"{p}x   (hidden in the lists below)" if p else "(no shared prefix — full IPs shown)"
+
+	###----------------------------------------------------------###
+	def getMenuActionConfigUiValues(self, menuId):
+		"""Pre-fill menu dialogs.  (Un)Ignore Devices: show the stripped IP prefix."""
+		valuesDict, errorMsgDict = super().getMenuActionConfigUiValues(menuId)
+		try:
+			if menuId == "manageIgnoredDevices":
+				# Seed the working copy from the live sets on open, and mark it
+				# seeded, so an empty pending field later means a genuinely
+				# empty list rather than "not filled in yet".
+				valuesDict["pendingIgnoredMacs"] = ", ".join(sorted(self._ignored_macs))
+				valuesDict["pendingIgnoredIps"]  = ", ".join(sorted(self._ignored_ips))
+				valuesDict["pendingSeeded"]      = "1"
+				valuesDict["ipPrefixShown"]      = self._ignore_prefix_text(None)
+		except Exception as e:
+			if not _benign_ipc_error(e):
+				self.indiLOG.log(30, f"getMenuActionConfigUiValues({menuId}): {e}")
+		return valuesDict, errorMsgDict
 
 	###----------------------------------------------------------###
 	@staticmethod
@@ -7974,53 +8310,114 @@ MENU ITEMS  (Plugins -> Network Scanner)
 		"""Safely extract a single selected value from an Indigo list field."""
 		val = valuesDict.get(fieldId, "")
 		if isinstance(val, str):
-			return val.strip().lower()
+			return val.strip()
 		try:
 			items = list(val)
-			return str(items[0]).strip().lower() if items else ""
+			return str(items[0]).strip() if items else ""
 		except Exception:
-			return str(val).strip().lower()
+			return str(val).strip()
 
 	###----------------------------------------------------------###
 	def addToIgnored(self, valuesDict, *args):
-		"""Button: move selected device from available list → ignored list."""
-		mac = self._list_selection(valuesDict, "availableDevicesList")
-		if not mac:
+		"""Button: ignore the selected device — both its MAC and its IP."""
+		sel = self._list_selection(valuesDict, "availableDevicesList")
+		if not sel:
 			return valuesDict
-		pending = self._dialog_ignored(valuesDict)
-		pending.add(mac)
-		valuesDict["pendingIgnoredMacs"] = ",".join(sorted(pending))
-		return valuesDict
+		mac, _, ip = sel.partition("|")
+		macs, ips = self._dialog_ignored(valuesDict)
+		if mac.strip(): macs.add(mac.strip().lower())
+		if ip.strip():  ips.add(ip.strip())
+		return self._stash_pending(valuesDict, macs, ips)
 
 	###----------------------------------------------------------###
-	def removeFromIgnored(self, valuesDict, *args):
-		"""Button: move selected device from ignored list → available list."""
-		mac = self._list_selection(valuesDict, "ignoredDevicesList")
-		if not mac:
+	def removeFromIgnoredMac(self, valuesDict, *args):
+		"""Button: un-ignore the selected MAC.
+
+		If the Indigo device still exists, its IP entry is removed too: while the
+		device is there the two entries describe ONE thing, and because
+		_is_ignored() matches on EITHER, leaving the IP behind would keep the
+		device ignored — the click would appear to do nothing.  Once the device
+		has been deleted the binding is gone and the entries are independent, so
+		only the selected one is removed.
+		"""
+		sel = self._list_selection(valuesDict, "ignoredMacList")
+		if not sel:
 			return valuesDict
-		pending = self._dialog_ignored(valuesDict)
-		pending.discard(mac)
-		valuesDict["pendingIgnoredMacs"] = ",".join(sorted(pending))
-		return valuesDict
+		mac = sel.strip().lower()
+		macs, ips = self._dialog_ignored(valuesDict)
+		macs.discard(mac)
+		by_mac, _ = self._ignored_label_maps()
+		if mac in by_mac:                      # device still exists → still coupled
+			mac2ip, _ = self._device_identity_maps()
+			partner = mac2ip.get(mac, "")
+			if partner and partner in ips:
+				ips.discard(partner)
+				# Provisional: the dialog has not been committed yet, and Cancel
+				# throws this away — nothing has been saved at this point.
+				self.indiLOG.log(20,
+					f"(dialog, not saved) MAC {mac} selected for un-ignore; its device "
+					f"still exists, so its IP {partner} is released too")
+		return self._stash_pending(valuesDict, macs, ips)
+
+	###----------------------------------------------------------###
+	def removeFromIgnoredIp(self, valuesDict, *args):
+		"""Button: un-ignore the selected IP.  Mirror of removeFromIgnoredMac.
+
+		Device still exists → its MAC entry goes too.  Device deleted → only this
+		IP is released, and the MAC that USED to share it stays ignored, because
+		that address may next be handed to something else entirely (and that MAC
+		may come back on a different address).
+		"""
+		sel = self._list_selection(valuesDict, "ignoredIpList")
+		if not sel:
+			return valuesDict
+		ip = sel.strip()
+		macs, ips = self._dialog_ignored(valuesDict)
+		ips.discard(ip)
+		_, by_ip = self._ignored_label_maps()
+		if ip in by_ip:                        # device still exists → still coupled
+			_, ip2mac = self._device_identity_maps()
+			partner = ip2mac.get(ip, "")
+			if partner and partner in macs:
+				macs.discard(partner)
+				self.indiLOG.log(20,
+					f"(dialog, not saved) IP {ip} selected for un-ignore; its device "
+					f"still exists, so its MAC {partner} is released too")
+		return self._stash_pending(valuesDict, macs, ips)
+
+	###----------------------------------------------------------###
+	def manageIgnoredDevices(self, valuesDict, *args):
+		"""OK button — commit both ignore lists and enable/disable the devices."""
+		new_macs, new_ips = self._dialog_ignored(valuesDict)
+		added_macs   = new_macs - self._ignored_macs
+		removed_macs = self._ignored_macs - new_macs
+		added_ips    = new_ips  - self._ignored_ips
+		removed_ips  = self._ignored_ips - new_ips
+
+		self._ignored_macs = new_macs
+		self._ignored_ips  = new_ips
+		self._save_ignored()
+
+		# Newly ignored → set the Indigo device to NOT enabled.  Newly un-ignored
+		# → enable it again.  Order matters: the sets are already committed, so
+		# _is_ignored() inside the enable pass sees the final state.
+		self._disable_ignored_devices(added_macs, added_ips, enable=False)
+		self._disable_ignored_devices(removed_macs, removed_ips, enable=True)
+
+		for label, entries in (("added", added_macs | added_ips),
+		                       ("removed", removed_macs | removed_ips)):
+			if entries:
+				self.indiLOG.log(20, f"Ignore list {label}: {', '.join(sorted(entries))}")
+		self.indiLOG.log(20,
+			f"Ignored: {len(self._ignored_macs)} MAC(s), {len(self._ignored_ips)} IP(s)"
+			+ (f" — MACs: {', '.join(sorted(self._ignored_macs))}" if self._ignored_macs else "")
+			+ (f" — IPs: {', '.join(sorted(self._ignored_ips))}"  if self._ignored_ips  else ""))
+		return True
 
 	###----------------------------------------------------------###
 	def manageIgnoredMacs(self, valuesDict, *args):
-		"""OK button — commit the pending ignored set to persistent storage."""
-		new_set = self._dialog_ignored(valuesDict)
-		added   = new_set - self._ignored_macs
-		removed = self._ignored_macs - new_set
-		self._ignored_macs = new_set
-		self._save_ignored_macs()
-		if added:
-			self.indiLOG.log(20, f"Ignored MACs added:   {', '.join(sorted(added))}")
-		if removed:
-			self.indiLOG.log(20, f"Ignored MACs removed: {', '.join(sorted(removed))}")
-		self.indiLOG.log(20,
-			f"Ignored MACs: {len(self._ignored_macs)} "
-			f"entr{'y' if len(self._ignored_macs) == 1 else 'ies'}"
-			+ (f" — {', '.join(sorted(self._ignored_macs))}" if self._ignored_macs else " — none")
-		)
-		return True
+		"""Backwards-compatible alias for the renamed dialog callback."""
+		return self.manageIgnoredDevices(valuesDict, *args)
 
 	# ------------------------------------------------------------------
 	# Action callbacks

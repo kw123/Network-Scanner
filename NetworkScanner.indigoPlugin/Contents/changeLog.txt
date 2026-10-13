@@ -1,26 +1,27 @@
  Network Scanner – Indigo Plugin
 Change Log
 ================================================================================
-SUMMARY — 2026.5.86 @ 2026-10-11   NOT PUBLISHED YET
+SUMMARY — 2026.6.0 @ 2026-10-13   NOT PUBLISHED YET
 
-FIXES:      The Home/Away group device had stopped writing ParticipantsHome
-            and onOffState whenever exactly one member was home, the ONLINE
-            group device raised KeyError on every single recalc, the
-            "one member left" flag only ever fired for a 2-member group,
-            PluginConfig.xml was malformed XML (2 unclosed <List>), and the
-            arp timeout warning claimed to raise a timeout it was already
-            capped at, then retried pointlessly at the same value.
-TECHNICAL:  Every numeric state read in the group recalc now goes through a
-            coercion helper and the device cache, so a never-written state
-            can no longer abort the recalc, and timed state writes run on a
-            delayed-action queue ported from the piBeacon plugin.
-NEW:        Home/Away states allHome, allButOneGone (renamed from
-            lastOneHome, now firing for 4/3/2 -> 1), firstGoneAfterAllHome,
-            participantsChanged, participantsHomeLast and
-            totalNumberOfParticipants; a "Log Delayed Actions" debug
-            option; and a "Resolve host names in arp" pref - the ARP sweep
-            now runs  arp -an  by default, which is orders of magnitude
-            faster on a large or proxy-ARP-polluted ARP cache.
+FIXES:      Home/Away froze with exactly one member home; ONLINE group
+            KeyError on every recalc; arp timeout warning + retry wrong at
+            the cap; PluginConfig.xml was malformed XML.
+TECHNICAL:  hardened numeric state reads; delayed-action queue ported from
+            piBeacon;  arp -an  now the default.
+NEW:        7 Home/Away states; "(Un)Ignore Devices" menu, by IP and MAC.
+
+================================================================================
+Version 2026.6.0 (2026-10-13)
+
+1. NEW menu item "(Un)Ignore Devices ..." (replaces "Manage Ignored MAC
+     Addresses"): 3 lists - active, ignored MACs, ignored IPs.
+
+2. Ignoring works by IP as well as MAC, sets the Indigo device to not
+     enabled, and never creates or modifies it.
+
+3. Un-ignoring releases both identities while the device still exists;
+     once it is deleted, MAC and IP are independent.
+
 
 ================================================================================
 Version 2026.5.83 (2026-10-11)

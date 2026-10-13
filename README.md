@@ -34,7 +34,11 @@ No third-party packages required.
 
 1. **Passive traffic sniffing** — `tcpdump` listens for ARP, mDNS (port 5353) and DHCP (ports 67/68). Any matching packet updates the device's last-seen timestamp. Catches devices that suppress ARP (iOS privacy mode, VMs, IoT). Each MAC throttled to one Indigo update per 30 s. Requires sudo password if tcpdump does not already have the BPF entitlement.
 
-2. **Active ARP sweep** — sends parallel ICMP pings to every host on the subnet, then reads the kernel ARP cache with `arp -a`. Only devices that actually respond to ping or TCP probe have their last-seen updated. Stale cache entries do not count as online. After processing, the plugin runs `sudo arp -d -a` to flush the ARP cache so stale entries from powered-off devices do not persist into the next cycle (requires sudo password). The `arp -a` output also captures the network interface (`en0` = Wi-Fi, `en1` = Ethernet) for each device, stored in `networkInterface`.
+2. **Active ARP sweep** — sends parallel ICMP pings to every host on the subnet, then reads the kernel ARP cache with `arp -an`. Only devices that actually respond to ping or TCP probe have their last-seen updated. Stale cache entries do not count as online. After processing, the plugin runs `sudo arp -d -a` to flush the ARP cache so stale entries from powered-off devices do not persist into the next cycle (requires sudo password). The `arp -an` output also captures the network interface (`en0` = Wi-Fi, `en1` = Ethernet) for each device, stored in `networkInterface`.
+
+   **Resolve host names in arp** (plugin config, default OFF) controls the `-n` flag. Leave it off: with names enabled, macOS `arp` performs one reverse-DNS lookup per cache entry, so the run time scales with the size of the ARP cache rather than the size of your network. On a host whose cache had filled with ~1500 proxy-ARP'd `169.254.x.x` entries, `arp -a` took **over two minutes** while `arp -an` took **0.05 s** — which is exactly what drives the adaptive `arp` timeout to its 40 s ceiling and produces a warning every scan cycle. The host name from `arp` is only a fallback: mDNS/Bonjour names take priority and are unaffected by this setting.
+
+   The `arp` timeout itself is adaptive and stored in the `arpTimeout` pref: raised by 10 s on each timeout up to a 40 s ceiling, and lowered again by 10 s per cycle (floor 15 s) whenever a call finishes in well under half its budget. So a host that was slow once recovers on its own instead of starting every later call at the ceiling.
 
 3. **Periodic reachability probe** — runs every scan-interval:
    - ICMP ping via Python socket (no subprocess, no root) — records round-trip time (`pingMs`) and IP TTL.
@@ -405,24 +409,44 @@ Tracks the time between consecutive sightings of each device, bucketed into:
 
 ---
 
-## Ignored MACs
+## Ignored Devices
 
-*Plugins → Network Scanner → Manage Ignored MAC Addresses…*
+*Plugins → Network Scanner → (Un)Ignore Devices…*
 
-- **Top list** — all discovered devices: select one → click **▼ Ignore Selected Device**
-- **Bottom list** — currently ignored: select one → click **▲ Un-ignore Selected Device**
-- Click **OK** to save
+- **Active Devices** — select one → **▼ Ignore Selected Device**
+- **Ignored MAC Addresses** — select one → **▲ Un-ignore Selected MAC**
+- **Ignored IP Addresses** — select one → **▲ Un-ignore Selected IP**
+- Nothing is saved until you click the action button; **Cancel** discards every change.
 
-Ignored MACs are neither created nor updated by the scanner.
+An ignored MAC or IP is never created or modified by the scanner, and its Indigo device is set to **not enabled**. Un-ignoring enables it again.
 
-### Always-ignored addresses
+Rows read *IP · MAC · vendor or device name*, sorted by IP. The IP column leaves out the prefix all your addresses share — shown once in the read-only field above the lists — so `192.168.1.42` appears as `1.042`. An address outside that prefix (multicast `224.0.0.251`, broadcast `255.255.255.255`) is shown in full.
 
-Two IPv4 addresses are never tracked as hosts and cannot be un-ignored:
+### MAC and IP are matched independently
 
-- **`224.0.0.251`** — the mDNS / Bonjour multicast group. Appears as a *permanent* `arp -a` entry (MAC `01:00:5e:00:00:fb`) and as a packet address in tcpdump output.
-- **`255.255.255.255`** — the all-hosts broadcast address, seen as the destination of DHCP Discover and similar traffic.
+A sighting is ignored if **either** its MAC or its IP is listed. Ignoring a device from the active list therefore adds both of its identities at once.
 
-Without this filter both can be registered as bogus network devices that then drift offline and never recover. The filter is applied in every path that can create a device: the passive sniff thread, the `arp -a` sweep parser, and both device-registration entry points. Unrelated to this, `0.0.0.0` (DHCP Discover before a lease exists) and `169.254.x.x` (RFC 3927 link-local / APIPA) are also rejected as device addresses.
+Un-ignoring depends on whether the Indigo device still exists:
+
+- **Device exists** — releasing either identity releases both. While the device is there the two entries describe one thing, and releasing only one would leave it ignored by the other, so the click would appear to do nothing.
+- **Device deleted** — only the selected entry is released. The binding is gone, and the two identities may belong to different things next: the same MAC can return on a new DHCP lease, and the same IP can return on a different MAC (iOS private / randomised MAC addresses).
+
+### Where the lists are stored
+
+A formatted JSON file in the plugin's own Preferences folder, alongside `known_devices.json`:
+
+```
+<Indigo>/Preferences/Plugins/com.karlwachs.networkscanner/ignored.json
+```
+
+```json
+{
+  "macs": ["01:00:5e:00:00:fb", "aa:bb:cc:dd:ee:ff"],
+  "ips":  ["192.168.1.42", "224.0.0.251"]
+}
+```
+
+Sorted and indented, so it can be read and hand-edited. It is deliberately **not** part of `known_devices.json`, which is rewritten on every save and may be deleted to force a rescan. Versions before 2026.6.0 kept these lists in the `ignoredMacs` / `ignoredIps` plugin prefs; those are migrated into the file once on first start and then cleared. If the file is unreadable the plugin starts with empty lists and leaves it in place for inspection.
 
 ---
 

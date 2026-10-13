@@ -409,15 +409,44 @@ Tracks the time between consecutive sightings of each device, bucketed into:
 
 ---
 
-## Ignored MACs
+## Ignored Devices
 
-*Plugins → Network Scanner → Manage Ignored MAC Addresses…*
+*Plugins → Network Scanner → (Un)Ignore Devices…*
 
-- **Top list** — all discovered devices: select one → click **▼ Ignore Selected Device**
-- **Bottom list** — currently ignored: select one → click **▲ Un-ignore Selected Device**
-- Click **OK** to save
+- **Active Devices** — select one → **▼ Ignore Selected Device**
+- **Ignored MAC Addresses** — select one → **▲ Un-ignore Selected MAC**
+- **Ignored IP Addresses** — select one → **▲ Un-ignore Selected IP**
+- Nothing is saved until you click the action button; **Cancel** discards every change.
 
-Ignored MACs are neither created nor updated by the scanner.
+An ignored MAC or IP is never created or modified by the scanner, and its Indigo device is set to **not enabled**. Un-ignoring enables it again.
+
+Rows read *IP · MAC · vendor or device name*, sorted by IP. The IP column leaves out the prefix all your addresses share — shown once in the read-only field above the lists — so `192.168.1.42` appears as `1.042`. An address outside that prefix (multicast `224.0.0.251`, broadcast `255.255.255.255`) is shown in full.
+
+### MAC and IP are matched independently
+
+A sighting is ignored if **either** its MAC or its IP is listed. Ignoring a device from the active list therefore adds both of its identities at once.
+
+Un-ignoring depends on whether the Indigo device still exists:
+
+- **Device exists** — releasing either identity releases both. While the device is there the two entries describe one thing, and releasing only one would leave it ignored by the other, so the click would appear to do nothing.
+- **Device deleted** — only the selected entry is released. The binding is gone, and the two identities may belong to different things next: the same MAC can return on a new DHCP lease, and the same IP can return on a different MAC (iOS private / randomised MAC addresses).
+
+### Where the lists are stored
+
+A formatted JSON file in the plugin's own Preferences folder, alongside `known_devices.json`:
+
+```
+<Indigo>/Preferences/Plugins/com.karlwachs.networkscanner/ignored.json
+```
+
+```json
+{
+  "macs": ["01:00:5e:00:00:fb", "aa:bb:cc:dd:ee:ff"],
+  "ips":  ["192.168.1.42", "224.0.0.251"]
+}
+```
+
+Sorted and indented, so it can be read and hand-edited. It is deliberately **not** part of `known_devices.json`, which is rewritten on every save and may be deleted to force a rescan. Versions before 2026.6.0 kept these lists in the `ignoredMacs` / `ignoredIps` plugin prefs; those are migrated into the file once on first start and then cleared. If the file is unreadable the plugin starts with empty lists and leaves it in place for inspection.
 
 ---
 
